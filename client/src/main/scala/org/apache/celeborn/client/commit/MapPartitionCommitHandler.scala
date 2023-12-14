@@ -52,7 +52,8 @@ class MapPartitionCommitHandler(
     conf: CelebornConf,
     shuffleAllocatedWorkers: ShuffleAllocatedWorkers,
     committedPartitionInfo: CommittedPartitionInfo,
-    workerStatusTracker: WorkerStatusTracker)
+    workerStatusTracker: WorkerStatusTracker,
+    shuffleMapperAttempts: ConcurrentHashMap[Integer, Array[Int]])
   extends CommitHandler(appId, conf, committedPartitionInfo, workerStatusTracker)
   with Logging {
 

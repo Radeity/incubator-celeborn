@@ -51,7 +51,8 @@ class ReducePartitionCommitHandler(
     conf: CelebornConf,
     shuffleAllocatedWorkers: ShuffleAllocatedWorkers,
     committedPartitionInfo: CommittedPartitionInfo,
-    workerStatusTracker: WorkerStatusTracker)
+    workerStatusTracker: WorkerStatusTracker,
+    shuffleMapperAttempts: ConcurrentHashMap[Integer, Array[Int]])
   extends CommitHandler(appUniqueId, conf, committedPartitionInfo, workerStatusTracker)
   with Logging {
 
@@ -60,7 +61,7 @@ class ReducePartitionCommitHandler(
   private val dataLostShuffleSet = ConcurrentHashMap.newKeySet[Int]()
   private val stageEndShuffleSet = ConcurrentHashMap.newKeySet[Int]()
   private val inProcessStageEndShuffleSet = ConcurrentHashMap.newKeySet[Int]()
-  private val shuffleMapperAttempts = JavaUtils.newConcurrentHashMap[Int, Array[Int]]()
+  // private val shuffleMapperAttempts = JavaUtils.newConcurrentHashMap[Int, Array[Int]]()
   private val stageEndTimeout = conf.clientPushStageEndTimeout
 
   private val rpcCacheSize = conf.clientRpcCacheSize

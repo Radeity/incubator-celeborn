@@ -18,17 +18,19 @@
 package org.apache.celeborn.service.deploy.worker
 
 import java.nio.ByteBuffer
+import java.util.{HashMap => JHashMap}
 import java.util.concurrent.{ConcurrentHashMap, ThreadPoolExecutor}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicIntegerArray}
 
 import scala.collection.JavaConverters._
+import scala.collection.mutable.ListBuffer
 import scala.concurrent.{Await, Promise}
 import scala.concurrent.duration.Duration
 import scala.util.{Failure, Success, Try}
 
 import com.google.common.base.Throwables
 import com.google.protobuf.GeneratedMessageV3
-import io.netty.buffer.ByteBuf
+import io.netty.buffer.{ByteBuf, Unpooled}
 
 import org.apache.celeborn.common.exception.{AlreadyClosedException, CelebornIOException}
 import org.apache.celeborn.common.internal.Logging
@@ -36,16 +38,16 @@ import org.apache.celeborn.common.meta.{DiskStatus, WorkerInfo, WorkerPartitionL
 import org.apache.celeborn.common.metrics.source.Source
 import org.apache.celeborn.common.network.buffer.{NettyManagedBuffer, NioManagedBuffer}
 import org.apache.celeborn.common.network.client.{RpcResponseCallback, TransportClient, TransportClientFactory}
-import org.apache.celeborn.common.network.protocol.{Message, PushData, PushDataHandShake, PushMergedData, RegionFinish, RegionStart, RequestMessage, RpcFailure, RpcRequest, RpcResponse, TransportMessage}
+import org.apache.celeborn.common.network.protocol._
 import org.apache.celeborn.common.network.protocol.Message.Type
 import org.apache.celeborn.common.network.server.BaseMessageHandler
-import org.apache.celeborn.common.protocol.{PartitionLocation, PartitionSplitMode, PartitionType, PbPushDataHandShake, PbRegionFinish, PbRegionStart}
+import org.apache.celeborn.common.protocol._
 import org.apache.celeborn.common.protocol.PbPartitionLocation.Mode
 import org.apache.celeborn.common.protocol.message.StatusCode
 import org.apache.celeborn.common.unsafe.Platform
 import org.apache.celeborn.common.util.{DiskUtils, Utils}
 import org.apache.celeborn.service.deploy.worker.congestcontrol.CongestionController
-import org.apache.celeborn.service.deploy.worker.storage.{FileWriter, HdfsFlusher, LocalFlusher, MapPartitionFileWriter, StorageManager}
+import org.apache.celeborn.service.deploy.worker.storage._
 
 class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler with Logging {
 
@@ -71,6 +73,9 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
   private var testPushPrimaryDataTimeout: Boolean = _
   private var testPushReplicaDataTimeout: Boolean = _
 
+  private var partitionRedirectMap
+      : JHashMap[String, JHashMap[PartitionLocation, PartitionLocation]] = _
+
   def init(worker: Worker): Unit = {
     partitionLocationInfo = worker.partitionLocationInfo
     shufflePartitionType = worker.shufflePartitionType
@@ -81,6 +86,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
     pushClientFactory = worker.pushClientFactory
     registered = worker.registered
     workerInfo = worker.workerInfo
+    partitionRedirectMap = worker.partitionRedirectMap
     diskReserveSize = worker.conf.workerDiskReserveSize
     diskReserveRatio = worker.conf.workerDiskReserveRatio
     diskUsableSizes = workerInfo.diskInfos.asScala.map { case (mountPoint, diskInfo) =>
@@ -108,6 +114,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
           pushData,
           pushData.requestId,
           () => {
+            logInfo(s"Receive push data request, data size: ${pushData.body().size()}")
             val callback = new SimpleRpcResponseCallback(
               client,
               pushData.requestId,
@@ -173,7 +180,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
       }
 
     // find FileWriter responsible for the data
-    val location =
+    val location: PartitionLocation =
       if (isPrimary) {
         partitionLocationInfo.getPrimaryLocation(shuffleKey, pushData.partitionUniqueId)
       } else {
@@ -221,6 +228,22 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
       return
     }
 
+    // Re-direct to other site (GSS)
+    val redirectPartitionMap = partitionRedirectMap.getOrDefault(shuffleKey, null)
+    if (redirectPartitionMap != null) {
+      val newLocation: PartitionLocation = redirectPartitionMap.getOrDefault(location, null)
+      if (newLocation != null && !newLocation.equals(location)) {
+        pushData.body().retain()
+        val newPushDataMsg =
+          new PushData(pushData.mode, pushData.shuffleKey, newLocation.getUniqueId, pushData.body())
+        redirectRequest(newPushDataMsg, newLocation, callbackWithTimer)
+        // TODO: 假设都可以正常完成 re-direct
+        callback.onSuccess(ByteBuffer.wrap(Array[Byte](StatusCode.PUSH_REMOTE_SITE.getValue)))
+        pushData.body().release()
+        return
+      }
+    }
+
     // During worker shutdown, worker will return HARD_SPLIT for all existed partition.
     // This should before return exception to make current push data can revive and retry.
     if (shutdown.get()) {
@@ -255,7 +278,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
         s"[handlePushData] FileWriter is already closed! File path ${fileWriter.getFileInfo.getFilePath}")
       callbackWithTimer.onFailure(new CelebornIOException("File already closed!"))
       fileWriter.decrementPendingWrites()
-      return;
+      return
     }
     val writePromise = Promise[Unit]()
     // for primary, send data to replica
@@ -366,6 +389,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
       // will fast stop pushing data to the worker, we won't return congest status. But
       // in the long term, especially if this issue could frequently happen, we may need to return
       // congest&softSplit status together
+      logInfo(s"No need to re-direct, start writing local data, filewriter: ${fileWriter.getFile.getAbsolutePath}")
       writeLocalData(Seq(fileWriter), body, shuffleKey, isPrimary, None, writePromise)
       Try(Await.result(writePromise.future, Duration.Inf)) match {
         case Success(_) =>
@@ -434,7 +458,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
       return
     }
 
-    val partitionIdToLocations =
+    val partitionIdToLocations: Array[(String, PartitionLocation)] =
       if (isPrimary) {
         partitionLocationInfo.getPrimaryLocations(shuffleKey, pushMergedData.partitionUniqueIds)
       } else {
@@ -489,6 +513,40 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
       index += 1
     }
 
+    // preprocess for re-direct
+    val redirectPartitionMap = partitionRedirectMap.getOrDefault(shuffleKey, null)
+
+    val localPartitionIdxs: ListBuffer[Int] = ListBuffer()
+    if (redirectPartitionMap == null) {
+      localPartitionIdxs.appendAll(partitionIdToLocations.indices)
+    } else {
+      var i = 0
+      for (uniqueIdLocation <- partitionIdToLocations) {
+        val newLocation: PartitionLocation =
+          redirectPartitionMap.getOrDefault(uniqueIdLocation._2, null)
+        if (newLocation != null && !newLocation.equals(uniqueIdLocation._2)) {
+          val offset = body.readerIndex() + batchOffsets(i)
+          val length =
+            if (i == batchOffsets.length - 1) {
+              body.readableBytes() - batchOffsets(i)
+            } else {
+              batchOffsets(i + 1) - batchOffsets(i)
+            }
+          val batchBody: ByteBuf = body.slice(offset, length)
+          val newBody = new NettyManagedBuffer(Unpooled.wrappedBuffer(batchBody))
+          val newPushDataMsg = new PushData(
+            pushMergedData.mode,
+            pushMergedData.shuffleKey,
+            newLocation.getUniqueId,
+            newBody)
+          redirectRequest(newPushDataMsg, newLocation, callbackWithTimer)
+        } else {
+          localPartitionIdxs.append(i)
+        }
+        i += 1
+      }
+    }
+
     // During worker shutdown, worker will return HARD_SPLIT for all existed partition.
     // This should before return exception to make current push data can revive and retry.
     if (shutdown.get()) {
@@ -496,7 +554,8 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
       return
     }
 
-    val (fileWriters, exceptionFileWriterIndexOpt) = getFileWriters(partitionIdToLocations)
+    val (fileWriters, exceptionFileWriterIndexOpt) =
+      getFileWriters(partitionIdToLocations, localPartitionIdxs)
     if (exceptionFileWriterIndexOpt.isDefined) {
       val fileWriterWithException = fileWriters(exceptionFileWriterIndexOpt.get)
       val cause =
@@ -622,12 +681,26 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
           }
         }
       })
-      writeLocalData(fileWriters, body, shuffleKey, isPrimary, Some(batchOffsets), writePromise)
+      writeLocalData(
+        fileWriters,
+        body,
+        shuffleKey,
+        isPrimary,
+        Some(batchOffsets),
+        writePromise,
+        Some(localPartitionIdxs))
     } else {
       // The codes here could be executed if
       // 1. the client doesn't enable push data to the replica, the primary worker could hit here
       // 2. the client enables push data to the replica, and the replica worker could hit here
-      writeLocalData(fileWriters, body, shuffleKey, isPrimary, Some(batchOffsets), writePromise)
+      writeLocalData(
+        fileWriters,
+        body,
+        shuffleKey,
+        isPrimary,
+        Some(batchOffsets),
+        writePromise,
+        Some(localPartitionIdxs))
       Try(Await.result(writePromise.future, Duration.Inf)) match {
         case Success(_) =>
           Option(CongestionController.instance()) match {
@@ -654,18 +727,75 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
     }
   }
 
+  private def redirectRequest(
+      msg: Message,
+      newLocation: PartitionLocation,
+      callback: RpcResponseCallbackWithTimer): Unit = {
+    val wrappedCallback: RpcResponseCallback = new RpcResponseCallback {
+      override def onSuccess(response: ByteBuffer): Unit = {
+        if (response.remaining() > 0) {
+          val resp = ByteBuffer.allocate(response.remaining())
+          resp.put(response)
+          resp.flip()
+//          callback.onSuccess(resp)
+        }
+//        else {
+//           callback.onSuccess(ByteBuffer.wrap(Array[Byte](StatusCode.PUSH_REMOTE_SITE.getValue)))
+//        }
+      }
+
+      override def onFailure(e: Throwable): Unit = {
+        logError(
+          s"Redirect push data request to newLocation ${newLocation} failed, cause: ${e.getMessage}")
+        callback.onFailure(
+          new CelebornIOException(StatusCode.PUSH_REMOTE_SITE_FAIL))
+      }
+    }
+
+    try {
+      val client: TransportClient =
+        getClient(newLocation.getHost, newLocation.getPushPort, newLocation.getId)
+      msg match {
+        case pushData: PushData =>
+          logInfo(
+            s"Redirect and send new PushData request of partition ${pushData.partitionUniqueId} to new partition ${newLocation.hostAndPushPort()}")
+          client.pushData(
+            pushData,
+            shufflePushDataTimeout.get(pushData.shuffleKey),
+            wrappedCallback)
+        case pushMergedData: PushMergedData =>
+          client.pushMergedData(
+            pushMergedData,
+            shufflePushDataTimeout.get(pushMergedData.shuffleKey),
+            wrappedCallback)
+      }
+    } catch {
+      case e: Exception =>
+        // NOTE: 不用 release，不同于 replica 是开一个线程去做，所以要在复制之前先 retain，然后复制完成再 release，
+        //  防止主线程执行完 handlePush 就 release buffer 将其回收掉；
+        //  然而, redirect 操作是在主线程进行的，不需要引入额外的计数。
+//        msg.body().release()
+        logError(
+          s"Redirect and push data to location $newLocation failed",
+          e)
+        callback.onFailure(
+          new CelebornIOException(StatusCode.PUSH_REMOTE_SITE_FAIL))
+    }
+  }
+
   /**
    * returns an array of FileWriters from partition locations along with an optional index for any FileWriter that
    * encountered an exception.
+   * Filtered by localPartitionIdxs
    */
   private def getFileWriters(
-      partitionIdToLocations: Array[(String, PartitionLocation)])
-      : (Array[FileWriter], Option[Int]) = {
-    val fileWriters = new Array[FileWriter](partitionIdToLocations.length)
+      partitionIdToLocations: Array[(String, PartitionLocation)],
+      localPartitionIdxs: ListBuffer[Int]): (Array[FileWriter], Option[Int]) = {
+    val fileWriters = new Array[FileWriter](localPartitionIdxs.length)
     var i = 0
     var exceptionFileWriterIndex: Option[Int] = None
-    while (i < partitionIdToLocations.length) {
-      val (_, workingPartition) = partitionIdToLocations(i)
+    while (i < localPartitionIdxs.length) {
+      val (_, workingPartition) = partitionIdToLocations(localPartitionIdxs(i))
       val fileWriter = workingPartition.asInstanceOf[WorkingPartition].getFileWriter
       if (fileWriter.getException != null) {
         exceptionFileWriterIndex = Some(i)
@@ -736,6 +866,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
           requestId,
           Throwables.getStackTraceAsString(e)))
     } finally {
+      // TODO: fix IllegalReferenceCountException - refCnt: 0, decrement: 1
       message.body().release()
     }
   }
@@ -793,7 +924,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
         s"[handleMapPartitionPushData] FileWriter is already closed! File path ${fileWriter.getFileInfo.getFilePath}")
       callback.onFailure(new CelebornIOException("File already closed!"))
       fileWriter.decrementPendingWrites()
-      return;
+      return
     }
     val writePromise = Promise[Unit]()
     writeLocalData(Seq(fileWriter), body, shuffleKey, isPrimary, None, writePromise)
@@ -1216,7 +1347,8 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
       shuffleKey: String,
       isPrimary: Boolean,
       batchOffsets: Option[Array[Int]],
-      writePromise: Promise[Unit]): Unit = {
+      writePromise: Promise[Unit],
+      localPartitionIdxs: Option[ListBuffer[Int]] = None): Unit = {
     def writeData(fileWriter: FileWriter, body: ByteBuf, shuffleKey: String): Unit = {
       try {
         fileWriter.write(body)
@@ -1246,11 +1378,12 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
     }
     batchOffsets match {
       case Some(batchOffsets) =>
-        var index = 0
+        var i = 0
         var fileWriter: FileWriter = null
-        while (index < fileWriters.length) {
+        while (i < fileWriters.length) {
+          val index = localPartitionIdxs.get(i)
           if (!writePromise.isCompleted) {
-            fileWriter = fileWriters(index)
+            fileWriter = fileWriters(i)
             val offset = body.readerIndex() + batchOffsets(index)
             val length =
               if (index == fileWriters.length - 1) {
@@ -1263,7 +1396,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
           } else {
             fileWriter.decrementPendingWrites()
           }
-          index += 1
+          i += 1
         }
       case _ =>
         writeData(fileWriters.head, body, shuffleKey)

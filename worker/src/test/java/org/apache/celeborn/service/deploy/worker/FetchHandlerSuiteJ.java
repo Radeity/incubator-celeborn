@@ -191,6 +191,16 @@ public class FetchHandlerSuiteJ {
     }
   }
 
+  //  @Test
+  //  public void testFetchAndRedirectFile() throws IOException {
+  //    FileInfo fileInfo = null;
+  //    try {
+  //      fileInfo = prepare(8);
+  //    } finally {
+  //      cleanup(fileInfo);
+  //    }
+  //  }
+
   @Test
   public void testLegacyOpenStream() throws IOException {
     FileInfo fileInfo = null;

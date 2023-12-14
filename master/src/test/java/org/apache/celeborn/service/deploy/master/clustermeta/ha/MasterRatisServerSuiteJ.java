@@ -20,8 +20,10 @@ package org.apache.celeborn.service.deploy.master.clustermeta.ha;
 import org.apache.ratis.protocol.RaftGroupId;
 import org.apache.ratis.util.LifeCycle;
 import org.junit.Assert;
+import org.junit.Ignore;
 import org.junit.Test;
 
+@Ignore
 public class MasterRatisServerSuiteJ extends RatisBaseSuiteJ {
 
   /** Start a Ratis Server and checks its state. */

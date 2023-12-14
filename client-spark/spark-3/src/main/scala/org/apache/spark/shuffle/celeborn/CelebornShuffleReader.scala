@@ -18,6 +18,8 @@
 package org.apache.spark.shuffle.celeborn
 
 import java.io.IOException
+import java.util
+import java.util.{HashMap, Map}
 import java.util.concurrent.{ConcurrentHashMap, ThreadPoolExecutor, TimeUnit}
 import java.util.concurrent.atomic.AtomicReference
 
@@ -33,7 +35,7 @@ import org.apache.celeborn.client.ShuffleClient
 import org.apache.celeborn.client.read.{CelebornInputStream, MetricsCallback}
 import org.apache.celeborn.common.CelebornConf
 import org.apache.celeborn.common.exception.{CelebornIOException, PartitionUnRetryAbleException}
-import org.apache.celeborn.common.util.ThreadUtils
+import org.apache.celeborn.common.util.{ThreadUtils, Utils}
 
 class CelebornShuffleReader[K, C](
     handle: CelebornShuffleHandle[K, _, C],
@@ -47,11 +49,19 @@ class CelebornShuffleReader[K, C](
     shuffleIdTracker: ExecutorShuffleIdTracker)
   extends ShuffleReader[K, C] with Logging {
 
+  // Hard-Coded
+  private val nodeSiteMap: util.Map[String, Integer] = new util.HashMap[String, Integer]
+  nodeSiteMap.put("localhost", 0)
+  nodeSiteMap.put("127.0.0.1", 0)
+  nodeSiteMap.put("10.176.24.55", 0)
+  nodeSiteMap.put("10.176.24.56", 1)
+  nodeSiteMap.put("10.176.24.57", 2)
+
   private val dep = handle.dependency
   private val shuffleClient = ShuffleClient.get(
     handle.appUniqueId,
     handle.lifecycleManagerHost,
-    handle.lifecycleManagerPort,
+    handle.lifecycleManagerPort + nodeSiteMap.getOrDefault(Utils.localHostName(conf), 0),
     conf,
     handle.userIdentifier)
 

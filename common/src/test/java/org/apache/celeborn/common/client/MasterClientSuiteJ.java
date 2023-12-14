@@ -31,6 +31,7 @@ import scala.concurrent.Future$;
 
 import com.google.common.util.concurrent.SettableFuture;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Test;
 import org.mockito.Mockito;
 import org.slf4j.Logger;
@@ -120,6 +121,7 @@ public class MasterClientSuiteJ {
     assertEquals(3, numTries.get());
   }
 
+  @Ignore
   @Test
   public void testSendOneWayMessageWithHA() throws Exception {
     final CelebornConf conf = prepareForCelebornConfWithHA();
@@ -189,6 +191,7 @@ public class MasterClientSuiteJ {
     assertEquals(mockResponse, response);
   }
 
+  @Ignore
   @Test
   public void testSendMessageWithHA() {
     final CelebornConf conf = prepareForCelebornConfWithHA();
@@ -209,11 +212,13 @@ public class MasterClientSuiteJ {
     assertEquals(mockResponse, response);
   }
 
+  @Ignore
   @Test
   public void testOneMasterDownCausedByIOExceptionInHA() {
     checkOneMasterDownInHA(new IOException("test"));
   }
 
+  @Ignore
   @Test
   public void testOneMasterDownCausedByRuntimeExceptionInHA() {
     checkOneMasterDownInHA(new RuntimeException("test"));

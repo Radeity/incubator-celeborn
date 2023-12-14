@@ -39,7 +39,7 @@ import org.apache.celeborn.common.meta.{DiskInfo, WorkerInfo, WorkerPartitionLoc
 import org.apache.celeborn.common.metrics.MetricsSystem
 import org.apache.celeborn.common.metrics.source.{JVMCPUSource, JVMSource, ResourceConsumptionSource, SystemMiscSource}
 import org.apache.celeborn.common.network.TransportContext
-import org.apache.celeborn.common.protocol.{PartitionType, PbRegisterWorkerResponse, PbWorkerLostResponse, RpcNameConstants, TransportModuleConstants}
+import org.apache.celeborn.common.protocol.{PartitionLocation, PartitionType, PbRegisterWorkerResponse, PbWorkerLostResponse, RpcNameConstants, TransportModuleConstants}
 import org.apache.celeborn.common.protocol.message.ControlMessages._
 import org.apache.celeborn.common.quota.ResourceConsumption
 import org.apache.celeborn.common.rpc._
@@ -237,11 +237,13 @@ private[celeborn] class Worker(
   var shufflePushDataTimeout: ConcurrentHashMap[String, Long] =
     JavaUtils.newConcurrentHashMap[String, Long]
   val partitionLocationInfo = new WorkerPartitionLocationInfo
+  val partitionRedirectMap = new JHashMap[String, JHashMap[PartitionLocation, PartitionLocation]]()
 
   val shuffleCommitInfos: ConcurrentHashMap[String, ConcurrentHashMap[Long, CommitInfo]] =
     JavaUtils.newConcurrentHashMap[String, ConcurrentHashMap[Long, CommitInfo]]()
 
-  private val masterClient = new MasterClient(rpcEnv, conf)
+  // register to Master from the same site
+  private val masterClient = new MasterClient(rpcEnv, conf, conf.nodeSiteId)
 
   // (workerInfo -> last connect timeout timestamp)
   val unavailablePeers: ConcurrentHashMap[WorkerInfo, Long] =

@@ -35,19 +35,17 @@ import org.apache.celeborn.client.LifecycleManager.{ShuffleAllocatedWorkers, Shu
 import org.apache.celeborn.client.listener.WorkerStatusListener
 import org.apache.celeborn.common.CelebornConf
 import org.apache.celeborn.common.client.MasterClient
-import org.apache.celeborn.common.exception.CelebornIOException
 import org.apache.celeborn.common.identity.{IdentityProvider, UserIdentifier}
 import org.apache.celeborn.common.internal.Logging
 import org.apache.celeborn.common.meta.{ShufflePartitionLocationInfo, WorkerInfo}
 import org.apache.celeborn.common.protocol._
 import org.apache.celeborn.common.protocol.RpcNameConstants.WORKER_EP
+import org.apache.celeborn.common.protocol.message.{ControlMessages, StatusCode}
 import org.apache.celeborn.common.protocol.message.ControlMessages._
-import org.apache.celeborn.common.protocol.message.StatusCode
 import org.apache.celeborn.common.rpc._
 import org.apache.celeborn.common.rpc.netty.{LocalNettyRpcCallContext, RemoteNettyRpcCallContext}
 import org.apache.celeborn.common.util.{JavaUtils, PbSerDeUtils, ThreadUtils, Utils}
 // Can Remove this if celeborn don't support scala211 in future
-import org.apache.celeborn.common.util.FunctionConverter._
 
 object LifecycleManager {
   // shuffle id -> partition id -> partition locations
@@ -58,8 +56,17 @@ object LifecycleManager {
   type ShuffleFailedWorkers = ConcurrentHashMap[WorkerInfo, (StatusCode, Long)]
 }
 
-class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends RpcEndpoint
+class LifecycleManager(
+    val appUniqueId: String,
+    val conf: CelebornConf,
+    val siteIdx: Int,
+    val shuffleMapperAttempts: ConcurrentHashMap[Integer, Array[Int]],
+    val rpcEndpointRefs: Array[RpcEndpointRef]) extends RpcEndpoint
   with Logging {
+
+  def this(appUniqueId: String, conf: CelebornConf) {
+    this(appUniqueId, conf, 0, JavaUtils.newConcurrentHashMap[Integer, Array[Int]](), Array())
+  }
 
   private val lifecycleHost = Utils.localHostName(conf)
 
@@ -137,13 +144,17 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
   override val rpcEnv: RpcEnv = RpcEnv.create(
     RpcNameConstants.LIFECYCLE_MANAGER_SYS,
     lifecycleHost,
-    conf.shuffleManagerPort,
+    conf.shuffleManagerPort + siteIdx,
     conf)
   rpcEnv.setupEndpoint(RpcNameConstants.LIFECYCLE_MANAGER_EP, this)
+  rpcEndpointRefs(siteIdx) = self
 
   logInfo(s"Starting LifecycleManager on ${rpcEnv.address}")
 
-  private val masterClient = new MasterClient(rpcEnv, conf)
+  private val masterClient = new MasterClient(rpcEnv, conf, siteIdx)
+//  private val masterClients: Array[MasterClient] = new Array[MasterClient](conf.siteNumber)
+//  private var partitionAssignedSite: mutable.HashMap[Int, Int] = new mutable.HashMap[Int, Int]()
+
   val commitManager = new CommitManager(appUniqueId, conf, this)
   val workerStatusTracker = new WorkerStatusTracker(conf, this)
   private val heartbeater =
@@ -623,10 +634,12 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
 
     val (mapperAttemptFinishedSuccess, allMapperFinished) =
       commitManager.finishMapperAttempt(shuffleId, mapId, attemptId, numMappers)
+    logDebug(s"handleMapperEnd: shuffleId-$shuffleId mapId-$mapId $mapperAttemptFinishedSuccess, $allMapperFinished")
     if (mapperAttemptFinishedSuccess && allMapperFinished) {
       // last mapper finished. call mapper end
       logInfo(s"Last MapperEnd, call StageEnd with shuffleKey:" +
         s"shuffleId $shuffleId.")
+      rpcEndpointRefs.foreach(_.send(StageEnd(shuffleId)))
       self.send(StageEnd(shuffleId))
     }
 
@@ -1261,6 +1274,22 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
     }
   }
 
+  private def requestWorkerPartitionSiteChange(
+      endpoint: RpcEndpointRef,
+      message: PartitionSiteChange): PartitionSiteChangeResponse = {
+    val shuffleKey = Utils.makeShuffleKey(message.applicationId, message.shuffleId)
+    try {
+      endpoint.askSync[PartitionSiteChangeResponse](message, conf.rpcAskTimeout)
+    } catch {
+      case e: Exception =>
+        val msg =
+          s"Exception when askSync worker(${endpoint.address}) PartitionSiteChange for $shuffleKey " +
+            s"on worker $endpoint."
+        logError(msg, e)
+        PartitionSiteChangeResponse(StatusCode.REQUEST_FAILED, msg + s" ${e.getMessage}")
+    }
+  }
+
   private def requestWorkerReserveSlots(
       endpoint: RpcEndpointRef,
       message: ReserveSlots): ReserveSlotsResponse = {
@@ -1360,6 +1389,58 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
 
   def registerAppShuffleDeterminate(appShuffleId: Int, determinate: Boolean): Unit = {
     appShuffleDeterminateMap.put(appShuffleId, determinate)
+  }
+
+  def updatePartitionSite(
+      appUniqueId: String,
+      appShuffleId: Int,
+      newSitePartitionLocation: Array[PartitionLocation]): JList[MapperEnd] = {
+    val shuffleLatestPartition = latestPartitionLocation.get(appShuffleId)
+    val workerNewPartition = new UpdateWorkerResource()
+    shuffleAllocatedWorkers.get(appShuffleId)
+      .forEach((workerInfo: WorkerInfo, partitionLocationInfo: ShufflePartitionLocationInfo) => {
+        val oldPartitionLocation = new util.ArrayList[PartitionLocation]()
+        val newPartitionLocation = new util.ArrayList[PartitionLocation]()
+        val locations: util.Set[PartitionLocation] = partitionLocationInfo.getPrimaryPartitions()
+        locations.iterator().forEachRemaining((location: PartitionLocation) => {
+          if (shuffleLatestPartition.get(location.getId).equals(location)) {
+            oldPartitionLocation.add(location)
+            newPartitionLocation.add(newSitePartitionLocation(location.getId))
+          }
+        })
+        workerNewPartition.put(workerInfo, (oldPartitionLocation, newPartitionLocation))
+      })
+
+    val updateWorker = workerNewPartition.asScala.filter(p => !p._2._1.isEmpty || !p._2._2.isEmpty)
+    logInfo(s"Site $siteIdx: update worker $updateWorker")
+
+    // NOTE: update partition site 时同时在写数据应该不会存在并发问题，会等到更新位置后，再将之前的数据发送到新的 site
+    val parallelism =
+      Math.min(Math.max(1, updateWorker.size), conf.clientRpcMaxParallelism)
+    ThreadUtils.parmap(updateWorker, "UpdatePartitionSite", parallelism) {
+      case (workerInfo, (oldPartitionLocation, newPartitionLocation)) =>
+        val res = requestWorkerPartitionSiteChange(
+          workerInfo.endpoint,
+          PartitionSiteChange(
+            appUniqueId,
+            appShuffleId,
+            oldPartitionLocation,
+            newPartitionLocation))
+    }
+
+    // return finished mapperIndex in current site
+    val finishedMapperEnd: JList[MapperEnd] = new util.ArrayList[MapperEnd]()
+    val mapperAttempts: Array[Int] = commitManager.getMapperAttempts(appShuffleId)
+    val numMappers: Int = mapperAttempts.length
+    var mapperIndex: Int = 0
+    for (mapperAttempt <- mapperAttempts) {
+      if (mapperAttempt > 0) {
+        finishedMapperEnd.add(MapperEnd(appShuffleId, mapperIndex, mapperAttempt, numMappers, -1))
+      }
+      mapperIndex += 1
+    }
+
+    finishedMapperEnd
   }
 
   // Initialize at the end of LifecycleManager construction.

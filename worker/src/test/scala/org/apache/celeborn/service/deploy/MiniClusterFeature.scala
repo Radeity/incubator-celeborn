@@ -35,10 +35,8 @@ trait MiniClusterFeature extends Logging {
   var masterInfo: (Master, Thread) = _
   val workerInfos = new mutable.HashMap[Worker, Thread]()
 
-  def runnerWrap[T](code: => T): Thread = new Thread(new Runnable {
-    override def run(): Unit = {
-      Utils.tryLogNonFatalError(code)
-    }
+  def runnerWrap[T](code: => T): Thread = new Thread(() => {
+    Utils.tryLogNonFatalError(code)
   })
 
   def createTmpDir(): String = {
@@ -117,6 +115,43 @@ trait MiniClusterFeature extends Logging {
 
     workerInfos.foreach { case (worker, _) => assert(worker.registered.get()) }
     (master, workerInfos.keySet)
+  }
+
+  def setUpGeodistributedCluster(
+      masterHost: String = null,
+      masterPort: Int = 0,
+      masterEndpoints: String = null,
+      masterNum: Int = 2,
+      workerNumPerSite: Int = 2): mutable.HashMap[Master, collection.Set[Worker]] = {
+    val siteNodeInfos = new mutable.HashMap[Master, collection.Set[Worker]]()
+
+    (0 until masterNum).foreach { i =>
+      val masterConf = Map(
+        "celeborn.master.host" -> masterHost,
+        "celeborn.master.port" -> (masterPort + i).toString)
+      val master = createMaster(masterConf)
+      val masterThread = runnerWrap(master.rpcEnv.awaitTermination())
+      masterThread.start()
+      masterInfo = (master, masterThread)
+      Thread.sleep(5000L)
+
+      val siteWorkers: collection.mutable.Set[Worker] = mutable.Set[Worker]()
+      val workerConf = Map(
+        "celeborn.master.endpoints" -> masterEndpoints,
+        "celeborn.node.site.id" -> i.toString)
+      (1 to workerNumPerSite).foreach { _ =>
+        val worker = createWorker(workerConf)
+        val workerThread = runnerWrap(worker.initialize())
+        workerThread.start()
+        workerInfos.put(worker, workerThread)
+        siteWorkers.add(worker)
+      }
+      siteNodeInfos(master) = siteWorkers
+    }
+    Thread.sleep(5000L)
+    workerInfos.foreach { case (worker, _) => assert(worker.registered.get()) }
+
+    siteNodeInfos
   }
 
   def shutdownMiniCluster(): Unit = {

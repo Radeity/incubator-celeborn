@@ -18,6 +18,10 @@
 package org.apache.spark.shuffle.celeborn;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -35,7 +39,10 @@ import org.slf4j.LoggerFactory;
 import org.apache.celeborn.client.LifecycleManager;
 import org.apache.celeborn.client.ShuffleClient;
 import org.apache.celeborn.common.CelebornConf;
+import org.apache.celeborn.common.protocol.PartitionLocation;
 import org.apache.celeborn.common.protocol.ShuffleMode;
+import org.apache.celeborn.common.protocol.message.ControlMessages;
+import org.apache.celeborn.common.rpc.RpcEndpointRef;
 import org.apache.celeborn.common.util.ThreadUtils;
 import org.apache.celeborn.reflect.DynMethods;
 
@@ -78,7 +85,18 @@ public class SparkShuffleManager implements ShuffleManager {
   // either be "{appId}_{appAttemptId}" or "{appId}"
   private String appUniqueId;
 
-  private LifecycleManager lifecycleManager;
+  // Hard-Coded
+  private static Map<String, Integer> nodeSiteMap = new HashMap<>();
+
+  static {
+    nodeSiteMap.put("localhost", 0);
+    nodeSiteMap.put("127.0.0.1", 0);
+    nodeSiteMap.put("10.176.24.55", 0);
+    nodeSiteMap.put("10.176.24.56", 1);
+    nodeSiteMap.put("10.176.24.57", 2);
+  }
+
+  private List<LifecycleManager> siteLifecycleManager;
   private ShuffleClient shuffleClient;
   private volatile SortShuffleManager _sortShuffleManager;
   private final ConcurrentHashMap.KeySetView<Integer, Boolean> sortShuffleIds =
@@ -135,16 +153,29 @@ public class SparkShuffleManager implements ShuffleManager {
     // need to ensure that LifecycleManager will only be created once. Parallelism needs to be
     // considered in this place, because if there is one RDD that depends on multiple RDDs
     // at the same time, it may bring parallel `register shuffle`, such as Join in Sql.
-    if (isDriver && lifecycleManager == null) {
+    if (isDriver && siteLifecycleManager == null) {
       synchronized (this) {
-        if (lifecycleManager == null) {
-          lifecycleManager = new LifecycleManager(appUniqueId, celebornConf);
+        if (siteLifecycleManager == null) {
+          int siteNumber = celebornConf.siteNumber();
+          siteLifecycleManager = new ArrayList<>(siteNumber);
+          // A shared-map for all lifecycleManager
+          ConcurrentHashMap<Integer, int[]> shuffleMapperAttempts = new ConcurrentHashMap<>();
+          RpcEndpointRef[] rpcEndpointRefs = new RpcEndpointRef[siteNumber];
+          for (int siteIdx = 0; siteIdx < siteNumber; siteIdx++) {
+            siteLifecycleManager.add(
+                new LifecycleManager(
+                    appUniqueId, celebornConf, siteIdx, shuffleMapperAttempts, rpcEndpointRefs));
+          }
+
           if (celebornConf.clientFetchThrowsFetchFailure()) {
             MapOutputTrackerMaster mapOutputTracker =
                 (MapOutputTrackerMaster) SparkEnv.get().mapOutputTracker();
 
-            lifecycleManager.registerShuffleTrackerCallback(
-                shuffleId -> SparkUtils.unregisterAllMapOutput(mapOutputTracker, shuffleId));
+            siteLifecycleManager.forEach(
+                lifecycleManager ->
+                    lifecycleManager.registerShuffleTrackerCallback(
+                        shuffleId ->
+                            SparkUtils.unregisterAllMapOutput(mapOutputTracker, shuffleId)));
           }
         }
       }
@@ -160,10 +191,14 @@ public class SparkShuffleManager implements ShuffleManager {
     appUniqueId = SparkUtils.appUniqueId(dependency.rdd().context());
     initializeLifecycleManager();
 
-    lifecycleManager.registerAppShuffleDeterminate(
-        shuffleId,
-        dependency.rdd().getOutputDeterministicLevel() != DeterministicLevel.INDETERMINATE());
+    siteLifecycleManager.forEach(
+        lifecycleManager ->
+            lifecycleManager.registerAppShuffleDeterminate(
+                shuffleId,
+                dependency.rdd().getOutputDeterministicLevel()
+                    != DeterministicLevel.INDETERMINATE()));
 
+    LifecycleManager lifecycleManager = siteLifecycleManager.get(0);
     if (fallbackPolicyRunner.applyAllFallbackPolicy(
         lifecycleManager, dependency.partitioner().numPartitions())) {
       if (conf.getBoolean("spark.dynamicAllocation.enabled", false)
@@ -179,6 +214,7 @@ public class SparkShuffleManager implements ShuffleManager {
       sortShuffleIds.add(shuffleId);
       return sortShuffleManager().registerShuffle(shuffleId, dependency);
     } else {
+      // handle 对于每个 partition 都是一样的，他们像 lifecycle 发数据时，actual_port = port + siteIdx
       return new CelebornShuffleHandle<>(
           appUniqueId,
           lifecycleManager.getHost(),
@@ -191,14 +227,19 @@ public class SparkShuffleManager implements ShuffleManager {
     }
   }
 
+  // Clean up after shuffle step is completed
   @Override
   public boolean unregisterShuffle(int appShuffleId) {
     if (sortShuffleIds.contains(appShuffleId)) {
       return sortShuffleManager().unregisterShuffle(appShuffleId);
     }
     // For Spark driver side trigger unregister shuffle.
-    if (lifecycleManager != null) {
-      lifecycleManager.unregisterAppShuffle(appShuffleId);
+    if (siteLifecycleManager != null) {
+      for (LifecycleManager lifecycleManager : siteLifecycleManager) {
+        if (lifecycleManager != null) {
+          lifecycleManager.unregisterAppShuffle(appShuffleId);
+        }
+      }
     }
     // For Spark executor side cleanup shuffle related info.
     if (shuffleClient != null) {
@@ -219,9 +260,13 @@ public class SparkShuffleManager implements ShuffleManager {
       ShuffleClient.reset();
       shuffleClient = null;
     }
-    if (lifecycleManager != null) {
-      lifecycleManager.stop();
-      lifecycleManager = null;
+    if (siteLifecycleManager != null) {
+      for (LifecycleManager lifecycleManager : siteLifecycleManager) {
+        if (lifecycleManager != null) {
+          lifecycleManager.stop();
+          lifecycleManager = null;
+        }
+      }
     }
     if (_sortShuffleManager != null) {
       _sortShuffleManager.stop();
@@ -236,11 +281,13 @@ public class SparkShuffleManager implements ShuffleManager {
       if (handle instanceof CelebornShuffleHandle) {
         @SuppressWarnings("unchecked")
         CelebornShuffleHandle<K, V, ?> h = ((CelebornShuffleHandle<K, V, ?>) handle);
+        String host = org.apache.celeborn.common.util.Utils.localHostName(celebornConf);
+        int siteIdx = nodeSiteMap.getOrDefault(host, 0);
         shuffleClient =
             ShuffleClient.get(
                 h.appUniqueId(),
                 h.lifecycleManagerHost(),
-                h.lifecycleManagerPort(),
+                h.lifecycleManagerPort() + siteIdx,
                 celebornConf,
                 h.userIdentifier());
         int shuffleId = SparkUtils.celebornShuffleId(shuffleClient, h, context, true);
@@ -407,6 +454,28 @@ public class SparkShuffleManager implements ShuffleManager {
 
   // for testing
   public LifecycleManager getLifecycleManager() {
-    return this.lifecycleManager;
+    return this.siteLifecycleManager.get(0);
+  }
+
+  public void updatePartitionSite(String appUniqueId, int shuffleId, int[] partitionSite) {
+    int numPartition = partitionSite.length;
+    PartitionLocation[] newSitePartitionLocation = new PartitionLocation[numPartition];
+    for (int partitionIdx = 0; partitionIdx < numPartition; partitionIdx++) {
+      int newSite = partitionSite[partitionIdx];
+      PartitionLocation newLocation =
+          siteLifecycleManager
+              .get(newSite)
+              .latestPartitionLocation()
+              .get(shuffleId)
+              .get(partitionIdx);
+      newSitePartitionLocation[partitionIdx] = newLocation;
+    }
+
+    List<ControlMessages.MapperEnd> finishedMapperIndex = new ArrayList<>();
+    // Broadcast to every site's lifecycleManager
+    for (LifecycleManager lifecycleManager : siteLifecycleManager) {
+      finishedMapperIndex.addAll(
+          lifecycleManager.updatePartitionSite(appUniqueId, shuffleId, newSitePartitionLocation));
+    }
   }
 }

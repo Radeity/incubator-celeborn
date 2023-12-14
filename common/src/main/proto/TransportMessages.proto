@@ -91,6 +91,8 @@ enum MessageType {
   REPORT_SHUFFLE_FETCH_FAILURE_RESPONSE = 68;
   GET_SHUFFLE_ID = 69;
   GET_SHUFFLE_ID_RESPONSE = 70;
+  PARTITION_SITE_CHANGE = 71;
+  PARTITION_SITE_CHANGE_RESPONSE = 72;
 }
 
 enum StreamType {
@@ -397,6 +399,18 @@ message PbReserveSlots {
 }
 
 message PbReserveSlotsResponse {
+  int32 status = 1;
+  string reason = 2;
+}
+
+message PbPartitionSiteChange {
+  string applicationId = 1;
+  int32 shuffleId = 2;
+  repeated PbPartitionLocation oldPartitionLocations = 3;
+  repeated PbPartitionLocation newPartitionLocations = 4;
+}
+
+message PbPartitionSiteChangeResponse {
   int32 status = 1;
   string reason = 2;
 }

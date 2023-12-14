@@ -828,6 +828,7 @@ public class ShuffleClientImpl extends ShuffleClient {
       return 0;
     }
     // register shuffle if not registered
+    // partitionId -> partitionLocation
     final ConcurrentHashMap<Integer, PartitionLocation> map =
         getPartitionLocation(shuffleId, numMappers, numPartitions);
 
@@ -1523,6 +1524,7 @@ public class ShuffleClientImpl extends ShuffleClient {
     PushState pushState = getPushState(mapKey);
 
     try {
+      // wait for all push request finish, ref: doPushMergedData.callback.onSuccess
       limitZeroInFlight(mapKey, pushState);
 
       MapperEndResponse response =

@@ -33,7 +33,7 @@ import org.apache.celeborn.client.read.MetricsCallback
 import org.apache.celeborn.common.CelebornConf
 import org.apache.celeborn.common.identity.UserIdentifier
 import org.apache.celeborn.common.internal.Logging
-import org.apache.celeborn.common.protocol.CompressionCodec
+import org.apache.celeborn.common.protocol.{CompressionCodec, PartitionLocation}
 import org.apache.celeborn.service.deploy.MiniClusterFeature
 
 trait ReadWriteTestBase extends AnyFunSuite
@@ -53,6 +53,79 @@ trait ReadWriteTestBase extends AnyFunSuite
   override def afterAll(): Unit = {
     logInfo("all test complete , stop Celeborn mini cluster")
     shutdownMiniCluster()
+  }
+
+  def testReadWriteWithRedirect(): Unit = {
+    val APP = "app-1"
+    val shuffleId = 0
+    val clientConf = new CelebornConf()
+      .set(CelebornConf.MASTER_ENDPOINTS.key, s"localhost:$masterPort")
+      .set(CelebornConf.CLIENT_PUSH_REPLICATE_ENABLED.key, "false")
+      .set(CelebornConf.CLIENT_PUSH_BUFFER_MAX_SIZE.key, "256K")
+      .set(CelebornConf.READ_LOCAL_SHUFFLE_FILE, false)
+      .set("celeborn.data.io.numConnectionsPerPeer", "1")
+    val lifecycleManager = new LifecycleManager(APP, clientConf)
+    val shuffleClient = new ShuffleClientImpl(APP, clientConf, UserIdentifier("mock", "mock"))
+    shuffleClient.setupLifecycleManagerRef(lifecycleManager.self)
+    val partitionLocationInfo = shuffleClient.getPartitionLocation(shuffleId, 1, 2)
+    val loc1: PartitionLocation = partitionLocationInfo.get(0)
+    val loc2: PartitionLocation = partitionLocationInfo.get(1)
+
+    val dataPrefix = Array("000000", "111111", "222222", "333333")
+    val dataPrefixMap = new mutable.HashMap[String, String]
+
+    // The 1st data push
+    val STR1 = dataPrefix(0) + RandomStringUtils.random(1024)
+    dataPrefixMap.put(dataPrefix(0), STR1)
+    val DATA1 = STR1.getBytes(StandardCharsets.UTF_8)
+    val OFFSET1 = 0
+    val LENGTH1 = DATA1.length
+    val dataSize1 = shuffleClient.pushData(shuffleId, 0, 0, 0, DATA1, OFFSET1, LENGTH1, 1, 2)
+    logInfo(s"push data data size $dataSize1")
+
+    lifecycleManager.updatePartitionSite(APP, shuffleId, Array(loc2, loc2))
+
+    // The 2nd data push(merged)
+    val STR2 = dataPrefix(1) + RandomStringUtils.random(2 * 1024)
+    dataPrefixMap.put(dataPrefix(1), STR2)
+    val DATA2 = STR2.getBytes(StandardCharsets.UTF_8)
+    val OFFSET2 = 0
+    val LENGTH2 = DATA2.length
+    val dataSize2 = shuffleClient.mergeData(shuffleId, 0, 0, 0, DATA2, 0, LENGTH2, 1, 2)
+    shuffleClient.pushMergedData(shuffleId, 0, 0)
+    //    val dataSize2 = shuffleClient.pushData(shuffleId, 0, 0, 0, DATA2, OFFSET2, LENGTH2, 1, 2)
+
+    logInfo("push data data size " + dataSize2)
+    Thread.sleep(1000)
+
+    shuffleClient.mapperEnd(shuffleId, 0, 0, 1)
+
+    val metricsCallback = new MetricsCallback {
+      override def incBytesRead(bytesWritten: Long): Unit = {}
+      override def incReadTime(time: Long): Unit = {}
+    }
+    // read data in partition 1
+    val inputStream =
+      shuffleClient.readPartition(shuffleId, 1, 0, 0, Integer.MAX_VALUE, metricsCallback)
+    val outputStream = new ByteArrayOutputStream()
+
+    var b = inputStream.read()
+    while (b != -1) {
+      outputStream.write(b)
+      b = inputStream.read()
+    }
+
+    val readBytes = outputStream.toByteArray
+    val readStringMap = getReadStringMap(readBytes, dataPrefix, dataPrefixMap)
+
+    Assert.assertEquals(LENGTH1 + LENGTH2, readBytes.length)
+    for ((prefix, data) <- readStringMap) {
+      Assert.assertEquals(dataPrefixMap.get(prefix).get, data)
+    }
+
+    Thread.sleep(5000L)
+    shuffleClient.shutdown()
+    lifecycleManager.rpcEnv.shutdown()
   }
 
   def testReadWriteByCode(codec: CompressionCodec, readLocalShuffle: Boolean = false): Unit = {
@@ -136,8 +209,8 @@ trait ReadWriteTestBase extends AnyFunSuite
       dataPrefixMap: mutable.HashMap[String, String]): mutable.HashMap[String, String] = {
     var readString = new String(readBytes, StandardCharsets.UTF_8)
     val prefixStringMap = new mutable.HashMap[String, String]
-    val loop = new Breaks;
-    for (i <- 0 to 4) {
+    val loop = new Breaks
+    for (_ <- 0 to 4) {
       loop.breakable {
         for (prefix <- dataPrefix) {
           if (readString.startsWith(prefix)) {

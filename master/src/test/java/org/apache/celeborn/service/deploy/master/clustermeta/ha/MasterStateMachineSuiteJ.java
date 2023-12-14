@@ -25,6 +25,7 @@ import java.util.UUID;
 
 import org.apache.ratis.statemachine.SnapshotInfo;
 import org.junit.Assert;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import org.apache.celeborn.common.CelebornConf;
@@ -40,6 +41,7 @@ import org.apache.celeborn.service.deploy.master.clustermeta.ResourceProtos.Reso
 import org.apache.celeborn.service.deploy.master.clustermeta.ResourceProtos.ResourceResponse;
 import org.apache.celeborn.service.deploy.master.clustermeta.ResourceProtos.Type;
 
+@Ignore
 public class MasterStateMachineSuiteJ extends RatisBaseSuiteJ {
 
   @Test

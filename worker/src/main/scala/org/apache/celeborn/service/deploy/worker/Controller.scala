@@ -18,6 +18,7 @@
 package org.apache.celeborn.service.deploy.worker
 
 import java.io.IOException
+import java.nio.ByteBuffer
 import java.util.{ArrayList => jArrayList, HashMap => jHashMap, List => jList, Set => jSet}
 import java.util.concurrent._
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicIntegerArray, AtomicReference}
@@ -33,7 +34,8 @@ import org.apache.celeborn.common.identity.UserIdentifier
 import org.apache.celeborn.common.internal.Logging
 import org.apache.celeborn.common.meta.{WorkerInfo, WorkerPartitionLocationInfo}
 import org.apache.celeborn.common.metrics.MetricsSystem
-import org.apache.celeborn.common.protocol.{PartitionLocation, PartitionSplitMode, PartitionType, StorageInfo}
+import org.apache.celeborn.common.network.protocol.{PushData, TransportMessage}
+import org.apache.celeborn.common.protocol.{MessageType, PartitionLocation, PartitionSplitMode, PartitionType, PbOpenStream, StorageInfo}
 import org.apache.celeborn.common.protocol.message.ControlMessages._
 import org.apache.celeborn.common.protocol.message.StatusCode
 import org.apache.celeborn.common.rpc._
@@ -55,12 +57,14 @@ private[deploy] class Controller(
   var shufflePushDataTimeout: ConcurrentHashMap[String, Long] = _
   var workerInfo: WorkerInfo = _
   var partitionLocationInfo: WorkerPartitionLocationInfo = _
+  var partitionRedirectMap: jHashMap[String, jHashMap[PartitionLocation, PartitionLocation]] = _
   var timer: HashedWheelTimer = _
   var commitThreadPool: ThreadPoolExecutor = _
   var asyncReplyPool: ScheduledExecutorService = _
   val minPartitionSizeToEstimate = conf.minPartitionSizeToEstimate
   var shutdown: AtomicBoolean = _
   val defaultPushdataTimeout = conf.pushDataTimeoutMs
+  var fetchHandler: FetchHandler = _
 
   val testRetryCommitFiles = conf.testRetryCommitFiles
 
@@ -72,10 +76,12 @@ private[deploy] class Controller(
     shuffleCommitInfos = worker.shuffleCommitInfos
     workerInfo = worker.workerInfo
     partitionLocationInfo = worker.partitionLocationInfo
+    partitionRedirectMap = worker.partitionRedirectMap
     timer = worker.timer
     commitThreadPool = worker.commitThreadPool
     asyncReplyPool = worker.asyncReplyPool
     shutdown = worker.shutdown
+    fetchHandler = worker.fetchHandler
   }
 
   override def receiveAndReply(context: RpcCallContext): PartialFunction[Any, Unit] = {
@@ -124,6 +130,15 @@ private[deploy] class Controller(
 
     case DestroyWorkerSlots(shuffleKey, primaryLocations, replicaLocations) =>
       handleDestroy(context, shuffleKey, primaryLocations, replicaLocations)
+
+    case PartitionSiteChange(
+          applicationId,
+          shuffleId,
+          oldPartitionLocations,
+          newPartitionLocations) =>
+      val shuffleKey = Utils.makeShuffleKey(applicationId, shuffleId)
+      logInfo(s"Received PartitionSiteChange request, $shuffleKey, new partition location: $newPartitionLocations.")
+      handlePartitionSiteChange(context, shuffleKey, oldPartitionLocations, newPartitionLocations)
   }
 
   private def handleReserveSlots(
@@ -185,8 +200,8 @@ private[deploy] class Controller(
       logWarning(s"[handleReserveSlots] $msg, will destroy writers.")
       primaryLocs.asScala.foreach { partitionLocation =>
         val fileWriter = partitionLocation.asInstanceOf[WorkingPartition].getFileWriter
-        fileWriter.destroy(new IOException(s"Destroy FileWriter ${fileWriter} caused by " +
-          s"reserving slots failed for ${shuffleKey}."))
+        fileWriter.destroy(new IOException(s"Destroy FileWriter $fileWriter caused by " +
+          s"reserving slots failed for $shuffleKey."))
       }
       context.reply(ReserveSlotsResponse(StatusCode.RESERVE_SLOTS_FAILED, msg))
       return
@@ -287,9 +302,24 @@ private[deploy] class Controller(
                   return
                 }
 
+                var redirectFlag: Boolean = false
+                val redirectPartitionMap = partitionRedirectMap.getOrDefault(shuffleKey, null)
+                if (redirectPartitionMap != null) {
+                  val newLocation: PartitionLocation =
+                    redirectPartitionMap.getOrDefault(location, null)
+                  if (newLocation != null && !newLocation.equals(location)) {
+                    // FileWriter is already closed during trigger partition data transfer
+                    redirectFlag = true
+                  }
+                }
+
                 val fileWriter = location.asInstanceOf[WorkingPartition].getFileWriter
-                waitMapPartitionRegionFinished(fileWriter, conf.workerShuffleCommitTimeout)
-                val bytes = fileWriter.close()
+                val bytes: Long =
+                  if (!redirectFlag) {
+                    waitMapPartitionRegionFinished(fileWriter, conf.workerShuffleCommitTimeout)
+                    fileWriter.close()
+                  } else 0L
+
                 if (bytes > 0L) {
                   if (fileWriter.getStorageInfo == null) {
                     // Only HDFS can be null, means that this partition location is deleted.
@@ -686,5 +716,56 @@ private[deploy] class Controller(
           failedPrimaries,
           failedReplicas))
     }
+  }
+
+  private def handlePartitionSiteChange(
+      context: RpcCallContext,
+      shuffleKey: String,
+      oldPartitionLocations: jList[PartitionLocation],
+      newPartitionLocations: jList[PartitionLocation]): Unit = {
+    val newShuffleRedirectMap = new jHashMap[PartitionLocation, PartitionLocation]()
+    val partitionNum: Int = oldPartitionLocations.size()
+    for (i <- 0 until partitionNum) {
+      newShuffleRedirectMap.put(oldPartitionLocations.get(i), newPartitionLocations.get(i))
+    }
+    val shuffleRedirectMap: jHashMap[PartitionLocation, PartitionLocation] =
+      partitionRedirectMap.getOrDefault(shuffleKey, null)
+    // upcoming PushData/PushMergedData request can re-direct to new partition site
+    if (shuffleRedirectMap == null) {
+      partitionRedirectMap.put(shuffleKey, newShuffleRedirectMap)
+    } else {
+      shuffleRedirectMap.putAll(newShuffleRedirectMap)
+    }
+
+    logInfo(s"new partitionRedirectMap $newShuffleRedirectMap")
+    // flush and send all received data once to new partition site
+    triggerPartitionDataTransfer(shuffleKey, oldPartitionLocations, newPartitionLocations)
+
+    context.reply(
+      PartitionSiteChangeResponse(StatusCode.SUCCESS))
+  }
+
+  private def triggerPartitionDataTransfer(
+      shuffleKey: String,
+      oldLocations: jList[PartitionLocation],
+      newLocations: jList[PartitionLocation]): Unit = {
+    val partitionNum = oldLocations.size()
+    for (i <- 0 until partitionNum) {
+      // First, flush all local datas in flushBuffer
+      val oldLocation: PartitionLocation =
+        partitionLocationInfo.getPrimaryLocation(shuffleKey, oldLocations.get(i).getUniqueId)
+      val newLocation: PartitionLocation = newLocations.get(i)
+      if (!oldLocation.equals(newLocation)) {
+        val fileWriter: FileWriter = oldLocation.asInstanceOf[WorkingPartition].getFileWriter
+        val bytes: Long = fileWriter.close()
+        logInfo(s"Final flush old partition $oldLocation, file size $bytes bytes")
+
+        // Second, send local data to new site
+        fetchHandler.handleFetchAndRedirect(shuffleKey, oldLocation.getFileName, newLocation)
+      }
+    }
+
+    // NOTE: The following step may be done by new site's lifecycleManager after PartitionSiteChange RPC is successfully handled
+    // (deprecated) Third, send mapperEnd to new Worker
   }
 }

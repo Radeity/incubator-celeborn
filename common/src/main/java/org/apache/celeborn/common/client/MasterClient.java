@@ -60,14 +60,21 @@ public class MasterClient {
   private final AtomicReference<RpcEndpointRef> rpcEndpointRef;
   private final ExecutorService oneWayMessageSender;
 
+  private final int siteIdx;
+
   public MasterClient(RpcEnv rpcEnv, CelebornConf conf) {
+    this(rpcEnv, conf, 0);
+  }
+
+  public MasterClient(RpcEnv rpcEnv, CelebornConf conf, int siteIdx) {
     this.rpcEnv = rpcEnv;
     this.masterEndpoints = Arrays.asList(conf.masterEndpoints());
-    Collections.shuffle(this.masterEndpoints);
+    //    Collections.shuffle(this.masterEndpoints);
     this.maxRetries = Math.max(masterEndpoints.size(), conf.masterClientMaxRetries());
     this.rpcTimeout = conf.masterClientRpcAskTimeout();
     this.rpcEndpointRef = new AtomicReference<>();
     this.oneWayMessageSender = ThreadUtils.newDaemonSingleThreadExecutor("One-Way-Message-Sender");
+    this.siteIdx = siteIdx;
   }
 
   private static final String SPLITTER = "#";
@@ -141,12 +148,13 @@ public class MasterClient {
     RpcEndpointRef endpointRef = null;
     // Use AtomicInteger or Integer or any Object which holds an int value is ok, we just need to
     // transfer an object to get the change of the current index of master addresses.
-    AtomicInteger currentMasterIdx = new AtomicInteger(0);
+    AtomicInteger currentMasterIdx = new AtomicInteger(siteIdx);
 
     long sleepLimitTime = 2000; // 2s
     while (numTries < maxRetries && shouldRetry) {
       try {
-        endpointRef = getOrSetupRpcEndpointRef(currentMasterIdx);
+        //        endpointRef = getOrSetupRpcEndpointRef(currentMasterIdx);
+        endpointRef = getOrSetupExactRpcEndpointRef(currentMasterIdx);
         Future<T> future = endpointRef.ask(message, rpcTimeout, ClassTag$.MODULE$.apply(clz));
         return rpcTimeout.awaitResult(future);
       } catch (Throwable e) {
@@ -234,6 +242,26 @@ public class MasterClient {
 
       currentIndex.set(index);
 
+      if (endpointRef == null) {
+        throw new IllegalStateException(
+            "After trying all the available Master Addresses,"
+                + " an usable link still couldn't be created.");
+      } else {
+        LOG.info("connect to master {}.", endpointRef.address());
+      }
+    }
+    return endpointRef;
+  }
+
+  // TODO: multi-thread 场景下会有问题吗？
+  private RpcEndpointRef getOrSetupExactRpcEndpointRef(AtomicInteger currentIndex) {
+    RpcEndpointRef endpointRef = rpcEndpointRef.get();
+    if (endpointRef == null) {
+      int index = currentIndex.get();
+      RpcEndpointRef tempEndpointRef = setupEndpointRef(masterEndpoints.get(index));
+      rpcEndpointRef.getAndSet(tempEndpointRef);
+
+      endpointRef = rpcEndpointRef.get();
       if (endpointRef == null) {
         throw new IllegalStateException(
             "After trying all the available Master Addresses,"

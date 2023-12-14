@@ -1094,6 +1094,12 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
   // //////////////////////////////////////////////////////
   def hdfsStorageKerberosPrincipal = get(HDFS_STORAGE_KERBEROS_PRINCIPAL)
   def hdfsStorageKerberosKeytab = get(HDFS_STORAGE_KERBEROS_KEYTAB)
+
+  // //////////////////////////////////////////////////////
+  //                      GSS                            //
+  // //////////////////////////////////////////////////////
+  def nodeSiteId: Int = get(NODE_SITE_ID)
+  def siteNumber: Int = get(SITE_NUMBER)
 }
 
 object CelebornConf extends Logging {
@@ -2982,6 +2988,22 @@ object CelebornConf extends Logging {
       .doc("The exit code of system kill for the maximum GC 'deficit' during worker jvm quake.")
       .intConf
       .createWithDefault(502)
+
+  val NODE_SITE_ID: ConfigEntry[Int] =
+    buildConf("celeborn.node.site.id")
+      .categories("worker", "Master")
+      .version("0.4.0")
+      .doc("The site ID of current worker & master.")
+      .intConf
+      .createWithDefault(0)
+
+  val SITE_NUMBER: ConfigEntry[Int] =
+    buildConf("celeborn.site.number")
+      .categories("Master")
+      .version("0.4.0")
+      .doc("The site number.")
+      .intConf
+      .createWithDefault(1)
 
   val APPLICATION_HEARTBEAT_INTERVAL: ConfigEntry[Long] =
     buildConf("celeborn.client.application.heartbeatInterval")

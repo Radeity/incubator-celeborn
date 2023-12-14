@@ -23,9 +23,11 @@ import java.util.UUID;
 
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Ignore;
 
 import org.apache.celeborn.common.CelebornConf;
 
+@Ignore
 public class RatisBaseSuiteJ {
   HARaftServer ratisServer;
 

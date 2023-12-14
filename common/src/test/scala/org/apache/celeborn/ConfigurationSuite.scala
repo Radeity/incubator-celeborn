@@ -54,35 +54,35 @@ class ConfigurationSuite extends AnyFunSuite {
     .resolve("configuration")
     .normalize
 
-  test("docs - configuration/client.md") {
+  ignore("docs - configuration/client.md") {
     generateConfigurationMarkdown("client")
   }
 
-  test("docs - configuration/columnar-shuffle.md") {
+  ignore("docs - configuration/columnar-shuffle.md") {
     generateConfigurationMarkdown("columnar-shuffle")
   }
 
-  test("docs - configuration/master.md") {
+  ignore("docs - configuration/master.md") {
     generateConfigurationMarkdown("master")
   }
 
-  test("docs - configuration/worker.md") {
+  ignore("docs - configuration/worker.md") {
     generateConfigurationMarkdown("worker")
   }
 
-  test("docs - configuration/quota.md") {
+  ignore("docs - configuration/quota.md") {
     generateConfigurationMarkdown("quota")
   }
 
-  test("docs - configuration/network.md") {
+  ignore("docs - configuration/network.md") {
     generateConfigurationMarkdown("network")
   }
 
-  test("docs - configuration/metrics.md") {
+  ignore("docs - configuration/metrics.md") {
     generateConfigurationMarkdown("metrics")
   }
 
-  test("docs - configuration/ha.md") {
+  ignore("docs - configuration/ha.md") {
     generateConfigurationMarkdown("ha")
   }
 

@@ -36,6 +36,11 @@
     <module>service</module>
     <module>master</module>
     <module>worker</module>
+    <module>client-spark/common</module>
+    <module>client-spark/spark-3</module>
+    <module>client-spark/spark-3-columnar-shuffle</module>
+    <module>client-spark/spark-3-shaded</module>
+    <module>tests/spark-it</module>
   </modules>
 
   <distributionManagement>
@@ -56,7 +61,7 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
-    <java.version>8</java.version>
+    <java.version>11</java.version>
     <scala.version>2.12.15</scala.version>
     <scala.binary.version>2.12</scala.binary.version>
     <maven.compiler.source>${java.version}</maven.compiler.source>
@@ -64,7 +69,7 @@
     <maven.version>3.8.8</maven.version>
 
     <flink.version>1.14.6</flink.version>
-    <spark.version>3.3.2</spark.version>
+    <spark.version>3.1.2</spark.version>
 
     <!-- use hadoop-3 as default  -->
     <hadoop.version>3.3.6</hadoop.version>
@@ -1070,7 +1075,7 @@
         <lz4-java.version>1.7.1</lz4-java.version>
         <scala.version>2.12.10</scala.version>
         <scala.binary.version>2.12</scala.binary.version>
-        <spark.version>3.1.3</spark.version>
+        <spark.version>3.1.2</spark.version>
         <zstd-jni.version>1.4.8-1</zstd-jni.version>
         <maven.plugin.silencer.version>1.6.0</maven.plugin.silencer.version>
       </properties>

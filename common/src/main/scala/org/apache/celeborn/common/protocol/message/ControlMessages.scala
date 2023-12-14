@@ -54,6 +54,12 @@ object ControlMessages extends Logging {
 
   type WorkerResource = java.util.HashMap[
     WorkerInfo,
+    // primaryPartitionLocation, replicaPartitionLocation
+    (java.util.List[PartitionLocation], java.util.List[PartitionLocation])]
+
+  type UpdateWorkerResource = java.util.HashMap[
+    WorkerInfo,
+    // oldPartitionLocation, newPartitionLocation
     (java.util.List[PartitionLocation], java.util.List[PartitionLocation])]
 
   /**
@@ -428,6 +434,17 @@ object ControlMessages extends Logging {
       status: StatusCode,
       reason: String = "") extends WorkerMessage
 
+  case class PartitionSiteChange(
+      applicationId: String,
+      shuffleId: Int,
+      oldPartitionLocations: util.List[PartitionLocation],
+      newPartitionLocations: util.List[PartitionLocation])
+    extends WorkerMessage
+
+  case class PartitionSiteChangeResponse(
+      status: StatusCode,
+      reason: String = "")
+
   case class CommitFiles(
       applicationId: String,
       shuffleId: Int,
@@ -780,6 +797,27 @@ object ControlMessages extends Logging {
         .build().toByteArray
       new TransportMessage(MessageType.RESERVE_SLOTS_RESPONSE, payload)
 
+    case PartitionSiteChange(
+          applicationId,
+          shuffleId,
+          oldPartitionLocations,
+          newPartitionLocations) =>
+      val payload = PbPartitionSiteChange.newBuilder()
+        .setApplicationId(applicationId)
+        .setShuffleId(shuffleId)
+        .addAllOldPartitionLocations(oldPartitionLocations.asScala
+          .map(PbSerDeUtils.toPbPartitionLocation).toList.asJava)
+        .addAllNewPartitionLocations(newPartitionLocations.asScala
+          .map(PbSerDeUtils.toPbPartitionLocation).toList.asJava)
+        .build().toByteArray
+      new TransportMessage(MessageType.PARTITION_SITE_CHANGE, payload)
+
+    case PartitionSiteChangeResponse(status, reason) =>
+      val payload = PbPartitionSiteChangeResponse.newBuilder()
+        .setStatus(status.getValue).setReason(reason)
+        .build().toByteArray
+      new TransportMessage(MessageType.PARTITION_SITE_CHANGE_RESPONSE, payload)
+
     case CommitFiles(applicationId, shuffleId, primaryIds, replicaIds, mapAttempts, epoch) =>
       val payload = PbCommitFiles.newBuilder()
         .setApplicationId(applicationId)
@@ -1089,6 +1127,25 @@ object ControlMessages extends Logging {
         ReserveSlotsResponse(
           Utils.toStatusCode(pbReserveSlotsResponse.getStatus),
           pbReserveSlotsResponse.getReason)
+
+      case PARTITION_SITE_CHANGE_VALUE =>
+        val pbPartitionSiteChange = PbPartitionSiteChange.parseFrom(message.getPayload)
+        PartitionSiteChange(
+          pbPartitionSiteChange.getApplicationId,
+          pbPartitionSiteChange.getShuffleId,
+          new util.ArrayList[PartitionLocation](
+            pbPartitionSiteChange.getOldPartitionLocationsList.asScala
+              .map(PbSerDeUtils.fromPbPartitionLocation).toList.asJava),
+          new util.ArrayList[PartitionLocation](
+            pbPartitionSiteChange.getNewPartitionLocationsList.asScala
+              .map(PbSerDeUtils.fromPbPartitionLocation).toList.asJava))
+
+      case PARTITION_SITE_CHANGE_RESPONSE_VALUE =>
+        val pbPartitionSiteChangeResponse =
+          PbPartitionSiteChangeResponse.parseFrom(message.getPayload)
+        PartitionSiteChangeResponse(
+          Utils.toStatusCode(pbPartitionSiteChangeResponse.getStatus),
+          pbPartitionSiteChangeResponse.getReason)
 
       case COMMIT_FILES_VALUE =>
         val pbCommitFiles = PbCommitFiles.parseFrom(message.getPayload)

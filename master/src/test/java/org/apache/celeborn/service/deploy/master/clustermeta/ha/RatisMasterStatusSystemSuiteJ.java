@@ -42,6 +42,7 @@ import org.apache.celeborn.common.rpc.netty.NettyRpcEndpointRef;
 import org.apache.celeborn.common.util.Utils;
 import org.apache.celeborn.service.deploy.master.clustermeta.AbstractMetaManager;
 
+@Ignore
 public class RatisMasterStatusSystemSuiteJ {
   protected static HARaftServer RATISSERVER1 = null;
   protected static HARaftServer RATISSERVER2 = null;

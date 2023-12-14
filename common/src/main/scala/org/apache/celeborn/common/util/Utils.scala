@@ -597,6 +597,10 @@ object Utils extends Logging {
     s"$applicationId-$shuffleId"
   }
 
+  def makeShuffleMapKey(applicationId: String, shuffleId: Int, mapId: Int): String = {
+    s"$applicationId-$shuffleId-$mapId"
+  }
+
   def splitShuffleKey(shuffleKey: String): (String, Int) = {
     val splits = shuffleKey.split("-")
     val appId = splits.dropRight(1).mkString("-")
