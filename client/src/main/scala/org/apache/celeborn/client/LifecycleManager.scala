@@ -65,7 +65,12 @@ class LifecycleManager(
   with Logging {
 
   def this(appUniqueId: String, conf: CelebornConf) {
-    this(appUniqueId, conf, 0, JavaUtils.newConcurrentHashMap[Integer, Array[Int]](), Array())
+    this(
+      appUniqueId,
+      conf,
+      0,
+      JavaUtils.newConcurrentHashMap[Integer, Array[Int]](),
+      new Array[RpcEndpointRef](1))
   }
 
   private val lifecycleHost = Utils.localHostName(conf)

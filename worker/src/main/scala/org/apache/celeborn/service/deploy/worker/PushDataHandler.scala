@@ -24,7 +24,8 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicIntegerArray}
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ListBuffer
-import scala.concurrent.{Await, Promise}
+import scala.concurrent.{Await, Future, Promise}
+import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.Duration
 import scala.util.{Failure, Success, Try}
 
@@ -233,12 +234,18 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
     if (redirectPartitionMap != null) {
       val newLocation: PartitionLocation = redirectPartitionMap.getOrDefault(location, null)
       if (newLocation != null && !newLocation.equals(location)) {
+        val redirectPromise: Promise[Unit] = Promise[Unit]
         pushData.body().retain()
         val newPushDataMsg =
           new PushData(pushData.mode, pushData.shuffleKey, newLocation.getUniqueId, pushData.body())
-        redirectRequest(newPushDataMsg, newLocation, callbackWithTimer)
+        redirectRequest(newPushDataMsg, newLocation, redirectPromise)
         // TODO: 假设都可以正常完成 re-direct
-        callback.onSuccess(ByteBuffer.wrap(Array[Byte](StatusCode.PUSH_REMOTE_SITE.getValue)))
+        Try(Await.result(redirectPromise.future, Duration.Inf)) match {
+          case Success(_) =>
+            callbackWithTimer.onSuccess(
+              ByteBuffer.wrap(Array[Byte](StatusCode.PUSH_REMOTE_SITE.getValue)))
+          case Failure(e) => callbackWithTimer.onFailure(e)
+        }
         pushData.body().release()
         return
       }
@@ -515,7 +522,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
 
     // preprocess for re-direct
     val redirectPartitionMap = partitionRedirectMap.getOrDefault(shuffleKey, null)
-
+    val redirectFutureList: ListBuffer[Future[Unit]] = ListBuffer()
     val localPartitionIdxs: ListBuffer[Int] = ListBuffer()
     if (redirectPartitionMap == null) {
       localPartitionIdxs.appendAll(partitionIdToLocations.indices)
@@ -539,14 +546,15 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
             pushMergedData.shuffleKey,
             newLocation.getUniqueId,
             newBody)
-          redirectRequest(newPushDataMsg, newLocation, callbackWithTimer)
+          val redirectPromise = Promise[Unit]()
+          redirectFutureList.append(redirectPromise.future)
+          redirectRequest(newPushDataMsg, newLocation, redirectPromise)
         } else {
           localPartitionIdxs.append(i)
         }
         i += 1
       }
     }
-
     // During worker shutdown, worker will return HARD_SPLIT for all existed partition.
     // This should before return exception to make current push data can revive and retry.
     if (shutdown.get()) {
@@ -720,7 +728,11 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
                 callbackWithTimer.onSuccess(ByteBuffer.wrap(Array[Byte]()))
               }
             case None =>
-              callbackWithTimer.onSuccess(ByteBuffer.wrap(Array[Byte]()))
+              val allRedirectFutures: Future[ListBuffer[Unit]] = Future.sequence(redirectFutureList)
+              allRedirectFutures.onComplete {
+                case Success(_) => callbackWithTimer.onSuccess(ByteBuffer.wrap(Array[Byte]()))
+                case Failure(e) => callbackWithTimer.onFailure(e)
+              }
           }
         case Failure(e) => callbackWithTimer.onFailure(e)
       }
@@ -730,25 +742,22 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
   private def redirectRequest(
       msg: Message,
       newLocation: PartitionLocation,
-      callback: RpcResponseCallbackWithTimer): Unit = {
+      redirectPromise: Promise[Unit]): Unit = {
     val wrappedCallback: RpcResponseCallback = new RpcResponseCallback {
       override def onSuccess(response: ByteBuffer): Unit = {
+        redirectPromise.success()
         if (response.remaining() > 0) {
           val resp = ByteBuffer.allocate(response.remaining())
           resp.put(response)
           resp.flip()
-//          callback.onSuccess(resp)
         }
-//        else {
-//           callback.onSuccess(ByteBuffer.wrap(Array[Byte](StatusCode.PUSH_REMOTE_SITE.getValue)))
-//        }
+        redirectPromise.success()
       }
 
       override def onFailure(e: Throwable): Unit = {
         logError(
           s"Redirect push data request to newLocation ${newLocation} failed, cause: ${e.getMessage}")
-        callback.onFailure(
-          new CelebornIOException(StatusCode.PUSH_REMOTE_SITE_FAIL))
+        redirectPromise.failure(new CelebornIOException(StatusCode.PUSH_REMOTE_SITE_FAIL))
       }
     }
 
@@ -778,8 +787,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
         logError(
           s"Redirect and push data to location $newLocation failed",
           e)
-        callback.onFailure(
-          new CelebornIOException(StatusCode.PUSH_REMOTE_SITE_FAIL))
+        redirectPromise.failure(new CelebornIOException(StatusCode.PUSH_REMOTE_SITE_FAIL))
     }
   }
 
