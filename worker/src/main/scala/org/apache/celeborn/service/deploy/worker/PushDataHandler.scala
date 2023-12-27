@@ -46,7 +46,7 @@ import org.apache.celeborn.common.protocol._
 import org.apache.celeborn.common.protocol.PbPartitionLocation.Mode
 import org.apache.celeborn.common.protocol.message.StatusCode
 import org.apache.celeborn.common.unsafe.Platform
-import org.apache.celeborn.common.util.{DiskUtils, Utils}
+import org.apache.celeborn.common.util.{DiskUtils, PbSerDeUtils, Utils}
 import org.apache.celeborn.service.deploy.worker.congestcontrol.CongestionController
 import org.apache.celeborn.service.deploy.worker.storage._
 
@@ -239,7 +239,8 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
         val newPushDataMsg =
           new PushData(pushData.mode, pushData.shuffleKey, newLocation.getUniqueId, pushData.body())
         redirectRequest(newPushDataMsg, newLocation, redirectPromise)
-        // TODO: 假设都可以正常完成 re-direct
+        // TODO: 假设都可以正常完成 re-direct，但有必要保留这个Promise吗？如果之后跑的时候遇到问题，需要留意一下，
+        //  但感觉应该问题不大，有了第一层 callback 已经是异步模式了
         Try(Await.result(redirectPromise.future, Duration.Inf)) match {
           case Success(_) =>
             callbackWithTimer.onSuccess(
@@ -751,12 +752,11 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
           resp.put(response)
           resp.flip()
         }
-        redirectPromise.success()
       }
 
       override def onFailure(e: Throwable): Unit = {
         logError(
-          s"Redirect push data request to newLocation ${newLocation} failed, cause: ${e.getMessage}")
+          s"Redirect push data request to newLocation $newLocation failed, cause: ${e.getMessage}")
         redirectPromise.failure(new CelebornIOException(StatusCode.PUSH_REMOTE_SITE_FAIL))
       }
     }
@@ -953,38 +953,52 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
 
   private def handleRpcRequest(client: TransportClient, rpcRequest: RpcRequest): Unit = {
     val requestId = rpcRequest.requestId
-    val (pbMsg, msg, isLegacy, messageType, mode, shuffleKey, partitionUniqueId, checkSplit) =
-      mapPartitionRpcRequest(rpcRequest)
+    val pbMsg = TransportMessage.fromByteBuffer(
+      rpcRequest.body().nioByteBuffer()).getParsedPayload.asInstanceOf[GeneratedMessageV3]
+    val handler = pbMsg match {
+      case psc: PbPartitionSiteChange =>
+        val p: PartitionLocation = PbSerDeUtils.fromPbPartitionLocation(psc.getNewPartitionLocations(0))
+        () =>
+          handlePartitionRedirectOnceDone(
+            Utils.makeShuffleKey(psc.getApplicationId, psc.getShuffleId),
+            p.getUniqueId,
+            new SimpleRpcResponseCallback(
+              client,
+              requestId,
+              ""))
+      case _ =>
+        val (msg, isLegacy, messageType, mode, shuffleKey, partitionUniqueId, checkSplit) =
+          mapPartitionRpcRequest(pbMsg, rpcRequest)
+        () =>
+          handleMapPartitionRpcRequestCore(
+            requestId,
+            pbMsg,
+            msg,
+            isLegacy,
+            messageType,
+            mode,
+            shuffleKey,
+            partitionUniqueId,
+            checkSplit,
+            new SimpleRpcResponseCallback(
+              client,
+              requestId,
+              shuffleKey))
+    }
     handleCore(
       client,
       rpcRequest,
       requestId,
-      () =>
-        handleMapPartitionRpcRequestCore(
-          requestId,
-          pbMsg,
-          msg,
-          isLegacy,
-          messageType,
-          mode,
-          shuffleKey,
-          partitionUniqueId,
-          checkSplit,
-          new SimpleRpcResponseCallback(
-            client,
-            requestId,
-            shuffleKey)))
+      handler
+    )
   }
 
-  private def mapPartitionRpcRequest(rpcRequest: RpcRequest)
-      : Tuple8[GeneratedMessageV3, Message, Boolean, Type, Mode, String, String, Boolean] = {
+  private def mapPartitionRpcRequest(msg: GeneratedMessageV3, rpcRequest: RpcRequest)
+      : Tuple7[Message, Boolean, Type, Mode, String, String, Boolean] = {
     try {
-      val msg = TransportMessage.fromByteBuffer(
-        rpcRequest.body().nioByteBuffer()).getParsedPayload.asInstanceOf[GeneratedMessageV3]
       msg match {
         case p: PbPushDataHandShake =>
           (
-            msg,
             null,
             false,
             Type.PUSH_DATA_HAND_SHAKE,
@@ -994,7 +1008,6 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
             true)
         case rs: PbRegionStart =>
           (
-            msg,
             null,
             false,
             Type.REGION_START,
@@ -1004,7 +1017,6 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
             true)
         case rf: PbRegionFinish =>
           (
-            msg,
             null,
             false,
             Type.REGION_FINISH,
@@ -1019,7 +1031,6 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
         msg match {
           case p: PushDataHandShake =>
             (
-              null,
               msg,
               true,
               Type.PUSH_DATA_HAND_SHAKE,
@@ -1029,7 +1040,6 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
               true)
           case rs: RegionStart =>
             (
-              null,
               msg,
               true,
               Type.REGION_START,
@@ -1039,7 +1049,6 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
               true)
           case rf: RegionFinish =>
             (
-              null,
               msg,
               true,
               Type.REGION_FINISH,
@@ -1049,6 +1058,15 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
               false)
         }
     }
+  }
+
+  private def handlePartitionRedirectOnceDone(shuffleKey: String, partitionUniqueId: String,
+                                              callback: RpcResponseCallback): Unit = {
+    val location = partitionLocationInfo.getPrimaryLocation(shuffleKey, partitionUniqueId)
+    val fileWriter = location.asInstanceOf[WorkingPartition].getFileWriter
+    logInfo(s"Current partition $partitionUniqueId receive notification that one site has sent all re-direct data once")
+    fileWriter.decrementPendingWrites()
+    callback.onSuccess(ByteBuffer.wrap(Array[Byte]()))
   }
 
   private def handleMapPartitionRpcRequestCore(

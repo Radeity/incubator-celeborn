@@ -25,4 +25,8 @@ class ClusterReadWriteTestWithRedirect extends GeoReadWriteTestBase {
   test(s"test geo-distributed cluster With Redirect operation") {
     testMultiSiteReadWrite()
   }
+
+  test(s"test geo-distributed cluster with delay schedule decision") {
+    // TODO
+  }
 }

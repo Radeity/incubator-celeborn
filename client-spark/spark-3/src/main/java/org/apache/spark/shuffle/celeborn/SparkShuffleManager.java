@@ -457,11 +457,11 @@ public class SparkShuffleManager implements ShuffleManager {
     return this.siteLifecycleManager.get(0);
   }
 
-  public void updatePartitionSite(String appUniqueId, int shuffleId, int[] partitionSite) {
+  public void updatePartitionSite(String appUniqueId, int shuffleId, String[] partitionSite) {
     int numPartition = partitionSite.length;
     PartitionLocation[] newSitePartitionLocation = new PartitionLocation[numPartition];
     for (int partitionIdx = 0; partitionIdx < numPartition; partitionIdx++) {
-      int newSite = partitionSite[partitionIdx];
+      int newSite = Integer.parseInt(partitionSite[partitionIdx]);
       PartitionLocation newLocation =
           siteLifecycleManager
               .get(newSite)
@@ -471,11 +471,9 @@ public class SparkShuffleManager implements ShuffleManager {
       newSitePartitionLocation[partitionIdx] = newLocation;
     }
 
-    List<ControlMessages.MapperEnd> finishedMapperIndex = new ArrayList<>();
     // Broadcast to every site's lifecycleManager
     for (LifecycleManager lifecycleManager : siteLifecycleManager) {
-      finishedMapperIndex.addAll(
-          lifecycleManager.updatePartitionSite(appUniqueId, shuffleId, newSitePartitionLocation));
+      lifecycleManager.updatePartitionSite(appUniqueId, shuffleId, newSitePartitionLocation);
     }
   }
 }

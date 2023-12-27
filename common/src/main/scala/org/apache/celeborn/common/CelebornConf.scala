@@ -1393,7 +1393,7 @@ object CelebornConf extends Logging {
       .doc("Timeout for RPC ask operations. " +
         "It's recommended to set at least `240s` when `HDFS` is enabled in `celeborn.storage.activeTypes`")
       .timeConf(TimeUnit.MILLISECONDS)
-      .createWithDefaultString("60s")
+      .createWithDefaultString("240s")
 
   val RPC_DISPATCHER_THREADS: ConfigEntry[Int] =
     buildConf("celeborn.rpc.dispatcher.threads")

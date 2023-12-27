@@ -20,10 +20,8 @@ package org.apache.celeborn.service.deploy.cluster
 import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
-
 import org.apache.commons.lang3.RandomStringUtils
 import org.junit.Assert
-
 import org.apache.celeborn.client.{LifecycleManager, ShuffleClientImpl}
 import org.apache.celeborn.client.read.MetricsCallback
 import org.apache.celeborn.common.CelebornConf
@@ -44,7 +42,6 @@ trait GeoReadWriteTestBase extends ReadWriteTestBase {
 
   def testMultiSiteReadWrite(): Unit = {
     val APP = "app-1"
-    val shuffleId = 0
     val clientConf = new CelebornConf()
       .set(CelebornConf.MASTER_ENDPOINTS.key, s"localhost:$masterPort1,localhost:$masterPort2")
       .set(CelebornConf.CLIENT_PUSH_REPLICATE_ENABLED.key, "false")
@@ -64,6 +61,10 @@ trait GeoReadWriteTestBase extends ReadWriteTestBase {
     val site2ShuffleClient = new ShuffleClientImpl(APP, clientConf, UserIdentifier("mock", "mock"))
     site2ShuffleClient.setupLifecycleManagerRef(siteLifecycleManager(1).self)
 
+    val appShuffleId = 16
+    val shuffleId = site1ShuffleClient.getShuffleId(appShuffleId, "16-0-0", true)
+    val shuffleId2 = site2ShuffleClient.getShuffleId(appShuffleId, "16-0-0", true)
+
     val site1Locs = site1ShuffleClient.getPartitionLocation(shuffleId, 3, 2)
     val site2Locs = site2ShuffleClient.getPartitionLocation(shuffleId, 3, 2)
 
@@ -75,7 +76,7 @@ trait GeoReadWriteTestBase extends ReadWriteTestBase {
     val OFFSET1 = 0
     val LENGTH1 = DATA1.length
     val dataSize1 = site1ShuffleClient.pushData(shuffleId, 0, 0, 0, DATA1, OFFSET1, LENGTH1, 3, 2)
-    logInfo(s"Map task 0 in site1 push data size $dataSize1 to reduce partition 0")
+    println(s"Map task 0 in site1 push data size $dataSize1 to reduce partition 0")
 
     val STR2 = dataPrefix(1) + RandomStringUtils.random(1024)
     val DATA2 = STR2.getBytes(StandardCharsets.UTF_8)
@@ -83,13 +84,14 @@ trait GeoReadWriteTestBase extends ReadWriteTestBase {
     val LENGTH2 = DATA2.length
     val dataSize2 = site1ShuffleClient.pushData(shuffleId, 0, 0, 1, DATA2, OFFSET2, LENGTH2, 3, 2)
     logInfo(s"Map task 0 in site1 push data size $dataSize2 to reduce partition 1")
-    Thread.sleep(1000)
+//    Thread.sleep(1000)
     site1ShuffleClient.mapperEnd(shuffleId, 0, 0, 3)
     // ===================================================================================================
-    val newSitePartitionLocation = Array(site1Locs.get(0), site2Locs.get(1))
-    for (lifecycleManager <- siteLifecycleManager) {
-      lifecycleManager.updatePartitionSite(APP, shuffleId, newSitePartitionLocation)
-    }
+//    val newSitePartitionLocation = Array(site1Locs.get(0), site2Locs.get(1))
+//    for (lifecycleManager <- siteLifecycleManager) {
+//      lifecycleManager.updatePartitionSite(APP, appShuffleId, newSitePartitionLocation)
+//    }
+//    logInfo("Update partition site on all lifecycleManagers")
     // ===================================================================================================
 
     // data push of Map partition 2 (in site 2)
@@ -99,7 +101,6 @@ trait GeoReadWriteTestBase extends ReadWriteTestBase {
     val LENGTH3 = DATA3.length
     val dataSize3 = site2ShuffleClient.pushData(shuffleId, 1, 0, 0, DATA3, OFFSET3, LENGTH3, 3, 2)
     logInfo(s"Map task 1 in site2 push data size $dataSize3 to reduce partition 0")
-    Thread.sleep(1000)
     site2ShuffleClient.mapperEnd(shuffleId, 1, 0, 3)
     // ===================================================================================================
 
@@ -110,9 +111,16 @@ trait GeoReadWriteTestBase extends ReadWriteTestBase {
     val LENGTH4 = DATA4.length
     val dataSize4 = site1ShuffleClient.pushData(shuffleId, 2, 0, 1, DATA4, OFFSET4, LENGTH4, 3, 2)
     logInfo(s"Map task 2 in site1 push data size $dataSize4 to reduce partition 1")
-    Thread.sleep(1000)
     site1ShuffleClient.mapperEnd(shuffleId, 2, 0, 3)
 //    site2ShuffleClient.mapperEnd(shuffleId, 2, 0, 3)
+    // ===================================================================================================
+
+    Thread.sleep(1000)
+    val newSitePartitionLocation = Array(site1Locs.get(0), site2Locs.get(1))
+    for (lifecycleManager <- siteLifecycleManager) {
+      lifecycleManager.updatePartitionSite(APP, appShuffleId, newSitePartitionLocation)
+    }
+    logInfo("Update partition site on all lifecycleManagers")
     // ===================================================================================================
 
     val metricsCallback = new MetricsCallback {

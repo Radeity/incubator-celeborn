@@ -22,6 +22,7 @@ import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
@@ -450,6 +451,10 @@ public class JavaUtils {
     } else {
       return new ConcurrentHashMapForJDK8<>(m);
     }
+  }
+
+  public static <V> HashSet<V> newHashSet() {
+    return new HashSet<>();
   }
 
   /**

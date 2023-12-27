@@ -23,7 +23,7 @@ import java.nio.channels.FileChannel
 import java.nio.charset.StandardCharsets
 import java.util
 import java.util.concurrent.{CompletableFuture, ThreadPoolExecutor}
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 import java.util.function.Consumer
 
 import com.google.common.base.Throwables
@@ -42,7 +42,7 @@ import org.apache.celeborn.common.network.protocol._
 import org.apache.celeborn.common.network.server.BaseMessageHandler
 import org.apache.celeborn.common.network.util.{NettyUtils, TransportConf}
 import org.apache.celeborn.common.protocol._
-import org.apache.celeborn.common.util.{ExceptionUtils, FileChannelUtils, ThreadUtils, Utils}
+import org.apache.celeborn.common.util.{ExceptionUtils, FileChannelUtils, PbSerDeUtils, ThreadUtils, Utils}
 import org.apache.celeborn.service.deploy.worker.storage.{ChunkStreamManager, CreditStreamManager, PartitionFilesSorter, StorageManager}
 
 class FetchHandler(
@@ -196,11 +196,12 @@ class FetchHandler(
 
   def handleFetchAndRedirect(
       shuffleKey: String,
-      fileName: String,
+      oldLoc: PartitionLocation,
       newLoc: PartitionLocation,
       startIndex: Int = 0,
       endIndex: Int = Int.MaxValue,
       readLocalShuffle: Boolean = true): Unit = {
+    val fileName = oldLoc.getFileName
     var fileInfo = getRawFileInfo(shuffleKey, fileName)
 
     // First, open stream
@@ -236,63 +237,78 @@ class FetchHandler(
       FileChannelUtils.openReadableFileChannel(pbStreamHandler.getFullPath)
     val client: TransportClient = pushClientFactory.createClient(newLoc.getHost, newLoc.getPushPort)
     var currentIndex = 0
-    var future: CompletableFuture[Void] = null
+    val future: CompletableFuture[Void] = new CompletableFuture[Void]()
+    val counter: AtomicInteger = new AtomicInteger(numChunks)
+    if (counter.get() == 0) {
+      future.complete(null)
+    }
     while (currentIndex < numChunks) {
       val toFetch: Int = Math.min(fetchMaxReqsInFlight, numChunks - currentIndex)
       val chunkIndex = currentIndex
       logInfo(s"Trigger local reader fetch chunk with $chunkIndex and fetch $toFetch chunks")
 
-      val task = CompletableFuture.runAsync(
-        () => {
-          for (i <- 0 until toFetch) {
-            val offset: Long = offsets.get(chunkIndex + i)
-            val length: Long = offsets.get(chunkIndex + i + 1) - offset
-            logInfo(s"Read $chunkIndex offset $offset length $length")
-            // A chunk must be smaller than INT.MAX_VALUE
-            val buffer: ByteBuffer = ByteBuffer.allocate(length.toInt)
-            while (buffer.hasRemaining) {
-              // TODO: 这里的 read 操作加了锁，确认多个 chunk 时是否会有影响，以及是否有必要多线程？
-              if (-1 == shuffleChannel.read(buffer))
-                throw new CelebornIOException("Read local file " + filePath + " failed")
+      for (i <- 0 until toFetch) {
+        val offset: Long = offsets.get(chunkIndex + i)
+        val length: Long = offsets.get(chunkIndex + i + 1) - offset
+        logInfo(s"Read $chunkIndex offset $offset length $length")
+        // A chunk must be smaller than INT.MAX_VALUE
+        val buffer: ByteBuffer = ByteBuffer.allocate(length.toInt)
+        while (buffer.hasRemaining) {
+          // TODO: 这里的 read 操作加了锁，确认多个 chunk 时是否会有影响，以及是否有必要多线程？
+          if (-1 == shuffleChannel.read(buffer))
+            throw new CelebornIOException("Read local file " + filePath + " failed")
+        }
+        buffer.flip
+        // Third, push local partition to new location
+        val callback: RpcResponseCallback = new RpcResponseCallback {
+          override def onSuccess(response: ByteBuffer): Unit = {
+            val currentCounter: Int = counter.decrementAndGet()
+            logInfo(s"Fetch and Redirect(send) chunk data to newLocation ${newLoc.getHost}:${newLoc.getPushPort} success, current counter: $currentCounter")
+            if (currentCounter == 0) {
+              future.complete(null)
             }
-            buffer.flip
-            // Third, push local partition to new location
-            val callback: RpcResponseCallback = new RpcResponseCallback {
-              override def onSuccess(response: ByteBuffer): Unit = {
-                logInfo(s"Fetch and Redirect(send) chunk data to newLocation $newLoc success")
-              }
-
-              override def onFailure(e: Throwable): Unit = {
-                logError(
-                  s"Fetch and Redirect(send) chunk data to newLocation $newLoc failed, cause: ${e.getMessage}")
-              }
-            }
-            logInfo(s"Start pushing index ${chunkIndex + i} to newLocation")
-            val newPushData: PushData = new PushData(
-              0,
-              shuffleKey,
-              newLoc.getUniqueId,
-              new NettyManagedBuffer(Unpooled.wrappedBuffer(buffer)))
-            client.pushData(newPushData, pushDataTimeout, callback)
           }
-        },
-        readLocalShufflePool)
 
-      if (future == null) {
-        future = task
-      } else {
-        future = CompletableFuture.allOf(future, task)
+          override def onFailure(e: Throwable): Unit = {
+            logError(
+              s"Fetch and Redirect(send) chunk data to newLocation $newLoc failed, cause: ${e.getMessage}")
+            future.completeExceptionally(e)
+          }
+        }
+        logInfo(s"Start pushing index ${chunkIndex + i} to newLocation")
+        val newPushData: PushData = new PushData(
+          0,
+          shuffleKey,
+          newLoc.getUniqueId,
+          new NettyManagedBuffer(Unpooled.wrappedBuffer(buffer)))
+        client.pushData(newPushData, pushDataTimeout, callback)
       }
       currentIndex += toFetch
     }
 
-    if (future != null) {
-      future.get()
-    }
+    future.whenComplete((result, exception) => {
+      if (exception == null) {
+        // Fourth, close channel to avoid resource leak
+        fileInfo.closeStream(streamId)
+        shuffleChannel.close()
 
-    // Fourth, close channel to avoid resource leak
-    fileInfo.closeStream(streamId)
-    shuffleChannel.close()
+        // Fifth, send RPC message to new location to notify once-redirect steps done
+        val (appUniqueId, shuffleId) = Utils.splitShuffleKey(shuffleKey)
+        logInfo(s"send RPC message to new location to notify once-redirect steps done for shuffle $shuffleKey")
+        client.sendRpcSync(
+          new TransportMessage(
+            MessageType.PARTITION_SITE_CHANGE,
+            PbPartitionSiteChange.newBuilder()
+              .setApplicationId(appUniqueId)
+              .setShuffleId(shuffleId)
+//              .addOldPartitionLocations(PbSerDeUtils.toPbPartitionLocation(oldLoc))  // No need
+              .addNewPartitionLocations(PbSerDeUtils.toPbPartitionLocation(newLoc))
+              .build()
+              .toByteArray).toByteBuffer,
+            conf.pushDataTimeoutMs
+        )
+      }
+    })
   }
 
   private def handleOpenStreamInternal(

@@ -17,30 +17,26 @@
 
 package org.apache.celeborn.service.deploy.worker
 
-import java.io.IOException
-import java.nio.ByteBuffer
-import java.util.{ArrayList => jArrayList, HashMap => jHashMap, List => jList, Set => jSet}
-import java.util.concurrent._
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicIntegerArray, AtomicReference}
-import java.util.function.BiFunction
-
-import scala.collection.JavaConverters._
-
 import io.netty.util.{HashedWheelTimer, Timeout, TimerTask}
-import org.roaringbitmap.RoaringBitmap
-
 import org.apache.celeborn.common.CelebornConf
 import org.apache.celeborn.common.identity.UserIdentifier
 import org.apache.celeborn.common.internal.Logging
 import org.apache.celeborn.common.meta.{WorkerInfo, WorkerPartitionLocationInfo}
 import org.apache.celeborn.common.metrics.MetricsSystem
-import org.apache.celeborn.common.network.protocol.{PushData, TransportMessage}
-import org.apache.celeborn.common.protocol.{MessageType, PartitionLocation, PartitionSplitMode, PartitionType, PbOpenStream, StorageInfo}
 import org.apache.celeborn.common.protocol.message.ControlMessages._
 import org.apache.celeborn.common.protocol.message.StatusCode
+import org.apache.celeborn.common.protocol.{PartitionLocation, PartitionSplitMode, PartitionType, StorageInfo}
 import org.apache.celeborn.common.rpc._
 import org.apache.celeborn.common.util.{JavaUtils, Utils}
 import org.apache.celeborn.service.deploy.worker.storage.{FileWriter, MapPartitionFileWriter, StorageManager}
+import org.roaringbitmap.RoaringBitmap
+
+import java.io.IOException
+import java.util.concurrent._
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicIntegerArray, AtomicReference}
+import java.util.function.BiFunction
+import java.util.{ArrayList => jArrayList, HashMap => jHashMap, List => jList, Set => jSet}
+import scala.collection.JavaConverters._
 
 private[deploy] class Controller(
     override val rpcEnv: RpcEnv,
@@ -755,13 +751,18 @@ private[deploy] class Controller(
       val oldLocation: PartitionLocation =
         partitionLocationInfo.getPrimaryLocation(shuffleKey, oldLocations.get(i).getUniqueId)
       val newLocation: PartitionLocation = newLocations.get(i)
+      val fileWriter: FileWriter = oldLocation.asInstanceOf[WorkingPartition].getFileWriter
       if (!oldLocation.equals(newLocation)) {
-        val fileWriter: FileWriter = oldLocation.asInstanceOf[WorkingPartition].getFileWriter
         val bytes: Long = fileWriter.close()
         logInfo(s"Final flush old partition $oldLocation, file size $bytes bytes")
 
         // Second, send local data to new site
-        fetchHandler.handleFetchAndRedirect(shuffleKey, oldLocation.getFileName, newLocation)
+        fetchHandler.handleFetchAndRedirect(shuffleKey, oldLocation, newLocation)
+      } else {
+        // update pending write and wait for other sited sending re-direct data(once)
+        for (_ <- 0 until conf.siteNumber) {
+          fileWriter.incrementPendingWrites()
+        }
       }
     }
 
