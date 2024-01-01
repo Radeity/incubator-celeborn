@@ -41,6 +41,8 @@ import org.apache.celeborn.common.write.PushState;
 public abstract class ShuffleClient {
   private static Logger logger = LoggerFactory.getLogger(ShuffleClient.class);
   private static volatile ShuffleClient _instance;
+  // for testing
+  private static volatile ShuffleClient[] _instances = new ShuffleClient[2];
   private static volatile boolean initialized = false;
   private static volatile FileSystem hdfsFs;
   private static LongAdder totalReadCounter = new LongAdder();
@@ -54,6 +56,26 @@ public abstract class ShuffleClient {
   }
 
   protected ShuffleClient() {}
+
+  // for testing
+  public static ShuffleClient get(
+      String appUniqueId,
+      String driverHost,
+      int port,
+      CelebornConf conf,
+      UserIdentifier userIdentifier,
+      int siteIdx) {
+    if (null == _instances[siteIdx] || !initialized) {
+      synchronized (ShuffleClient.class) {
+        if (null == _instances[siteIdx]) {
+          _instances[siteIdx] = new ShuffleClientImpl(appUniqueId, conf, userIdentifier);
+          _instances[siteIdx].setupLifecycleManagerRef(driverHost, port);
+          initialized = true;
+        }
+      }
+    }
+    return _instances[siteIdx];
+  }
 
   public static ShuffleClient get(
       String appUniqueId,

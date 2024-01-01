@@ -22,12 +22,12 @@ import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.charset.StandardCharsets;
-import java.util.HashSet;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.regex.Matcher;
@@ -453,8 +453,8 @@ public class JavaUtils {
     }
   }
 
-  public static <V> HashSet<V> newHashSet() {
-    return new HashSet<>();
+  public static <V> CopyOnWriteArraySet<V> newCopyOnWriteArraySet() {
+    return new CopyOnWriteArraySet<>();
   }
 
   /**

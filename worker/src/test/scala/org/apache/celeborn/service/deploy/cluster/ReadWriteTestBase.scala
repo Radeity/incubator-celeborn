@@ -83,7 +83,7 @@ trait ReadWriteTestBase extends AnyFunSuite
     val dataSize1 = shuffleClient.pushData(shuffleId, 0, 0, 0, DATA1, OFFSET1, LENGTH1, 1, 2)
     logInfo(s"push data data size $dataSize1")
 
-    lifecycleManager.updatePartitionSite(APP, shuffleId, Array(loc2, loc2))
+    lifecycleManager.handleUpdatePartitionSite(APP, shuffleId, Array(loc2, loc2), 1)
 
     // The 2nd data push(merged)
     val STR2 = dataPrefix(1) + RandomStringUtils.random(2 * 1024)
@@ -91,9 +91,9 @@ trait ReadWriteTestBase extends AnyFunSuite
     val DATA2 = STR2.getBytes(StandardCharsets.UTF_8)
     val OFFSET2 = 0
     val LENGTH2 = DATA2.length
-    val dataSize2 = shuffleClient.mergeData(shuffleId, 0, 0, 0, DATA2, 0, LENGTH2, 1, 2)
-    shuffleClient.pushMergedData(shuffleId, 0, 0)
-    //    val dataSize2 = shuffleClient.pushData(shuffleId, 0, 0, 0, DATA2, OFFSET2, LENGTH2, 1, 2)
+//    val dataSize2 = shuffleClient.mergeData(shuffleId, 0, 0, 0, DATA2, 0, LENGTH2, 1, 2)
+//    shuffleClient.pushMergedData(shuffleId, 0, 0)
+    val dataSize2 = shuffleClient.pushData(shuffleId, 0, 0, 0, DATA2, OFFSET2, LENGTH2, 1, 2)
 
     logInfo("push data data size " + dataSize2)
     Thread.sleep(1000)

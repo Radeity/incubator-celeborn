@@ -26,6 +26,7 @@ import java.util.function.Consumer
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable
+import scala.collection.mutable.ArrayBuffer
 import scala.util.Random
 
 import com.google.common.annotations.VisibleForTesting
@@ -102,7 +103,9 @@ class LifecycleManager(
   // app shuffle id -> whether shuffle is determinate, rerun of a indeterminate shuffle gets different result
   private val appShuffleDeterminateMap = JavaUtils.newConcurrentHashMap[Int, Boolean]()
 
-  private val scheduledShuffle = JavaUtils.newHashSet[Int]()
+  private val gssMode = conf.gssMode
+  private val scheduledShuffle = JavaUtils.newCopyOnWriteArraySet[Int]()
+  private val finishHandleScheduledShuffle = JavaUtils.newCopyOnWriteArraySet[Int]()
 
   private val rpcCacheSize = conf.clientRpcCacheSize
   private val rpcCacheConcurrencyLevel = conf.clientRpcCacheConcurrencyLevel
@@ -238,8 +241,21 @@ class LifecycleManager(
     case RemoveExpiredShuffle =>
       removeExpiredShuffle()
     case StageEnd(shuffleId) =>
-      logInfo(s"Received StageEnd request, shuffleId $shuffleId.")
+      logDebug(s"[Site-$siteIdx] Receive StageEnd request, shuffleId $shuffleId.")
       handleStageEnd(shuffleId)
+    case PartitionSiteChange(
+          applicationId,
+          appShuffleId,
+          oldPartitionLocations,
+          newPartitionLocations,
+          waitSites) =>
+      val shuffleId = getShuffleIdFromAppShuffleId(appShuffleId)
+      logDebug(s"[Site-$siteIdx] Receive PartitionSiteChange RPC for appShuffleId: $appShuffleId, find shuffleId: $shuffleId")
+      handleUpdatePartitionSite(
+        applicationId,
+        shuffleId,
+        newPartitionLocations.asScala.toArray,
+        waitSites)
   }
 
   override def receiveAndReply(context: RpcCallContext): PartialFunction[Any, Unit] = {
@@ -342,7 +358,7 @@ class LifecycleManager(
       val appShuffleId = pb.getAppShuffleId
       val appShuffleIdentifier = pb.getAppShuffleIdentifier
       val isWriter = pb.getIsShuffleWriter
-      logDebug(s"Received GetShuffleId request, appShuffleId $appShuffleId appShuffleIdentifier $appShuffleIdentifier isWriter $isWriter.")
+      println(s"Site $siteIdx, Received GetShuffleId request, appShuffleId $appShuffleId appShuffleIdentifier $appShuffleIdentifier isWriter $isWriter.")
       handleGetShuffleIdForApp(context, appShuffleId, appShuffleIdentifier, isWriter)
 
     case pb: PbReportShuffleFetchFailure =>
@@ -578,6 +594,29 @@ class LifecycleManager(
       replyRegisterShuffle(RegisterShuffleResponse(
         StatusCode.SUCCESS,
         allPrimaryPartitionLocations))
+
+      // for test ==================================================================
+//      if (siteIdx == 0) {
+//        Thread.sleep(1000)
+//      } else {
+//        val newLocs = ArrayBuffer[PartitionLocation]()
+//        latestPartitionLocation.get(shuffleId).forEach((_, p) => newLocs += p)
+//        var appShuffleId = -1
+//        shuffleIdMapping.forEach((aId, m) => {
+//          m.values.foreach(e => {
+//            if (e._1 == shuffleId) {
+//              appShuffleId = aId
+//            }
+//          })
+//        })
+//        rpcEndpointRefs.foreach(_.send(PartitionSiteChange(
+//          appUniqueId,
+//          appShuffleId,
+//          null,
+//          newLocs.asJava,
+//          1)))
+//      }
+      // ===========================================================================
     }
   }
 
@@ -639,15 +678,46 @@ class LifecycleManager(
       attemptId: Int,
       numMappers: Int): Unit = {
 
+    // for test, remove later
+    if (siteIdx == 0) {
+      Thread.sleep(1600)
+    }
+
     val (mapperAttemptFinishedSuccess, allMapperFinished) =
       commitManager.finishMapperAttempt(shuffleId, mapId, attemptId, numMappers)
-    logInfo(s"handleMapperEnd: shuffleId-$shuffleId mapId-$mapId $mapperAttemptFinishedSuccess, $allMapperFinished")
-    if (mapperAttemptFinishedSuccess && allMapperFinished && scheduledShuffle.contains(shuffleId)) {
-      // last mapper finished. call mapper end
-      logInfo(s"Last MapperEnd, call StageEnd with shuffleKey:" +
-        s"shuffleId $shuffleId.")
-      rpcEndpointRefs.foreach(_.send(StageEnd(shuffleId)))
-      self.send(StageEnd(shuffleId))
+    logDebug(s"site: $siteIdx handleMapperEnd: shuffleId-$shuffleId mapId-$mapId $mapperAttemptFinishedSuccess, $allMapperFinished")
+    if (mapperAttemptFinishedSuccess && allMapperFinished) {
+      if (!gssMode || finishHandleScheduledShuffle.contains(shuffleId)) {
+        // last mapper finished. call mapper end
+        logDebug(s"Last MapperEnd, call StageEnd with shuffleKey:" +
+          s"shuffleId $shuffleId.")
+        rpcEndpointRefs.foreach(_.send(StageEnd(shuffleId)))
+      } else {
+        // for test
+        if (conf.testGSSEarlySchedule) {
+          logDebug(s"[Site-$siteIdx] Mock schedule result for test")
+          val newLocs = ArrayBuffer[PartitionLocation]()
+          latestPartitionLocation.get(shuffleId).forEach((_, p) => newLocs += p)
+          logInfo("newLocs:" + newLocs)
+
+          var appShuffleId = -1
+          // use appShuffleId, unify id between multi-siteManager
+          shuffleIdMapping.forEach((aId, m) => {
+            m.values.foreach(e => {
+              if (e._1 == shuffleId) {
+                appShuffleId = aId
+              }
+            })
+          })
+
+          rpcEndpointRefs.foreach(_.send(PartitionSiteChange(
+            appUniqueId,
+            appShuffleId,
+            null,
+            newLocs.asJava,
+            1)))
+        }
+      }
     }
 
     // reply success
@@ -790,6 +860,7 @@ class LifecycleManager(
       return
     }
 
+    logDebug(s"Site $siteIdx handle stageEnd and try to commit files!!!")
     if (commitManager.tryFinalCommit(shuffleId)) {
       // Here we only clear PartitionLocation info in shuffleAllocatedWorkers.
       // Since rerun or speculation task may running after we handle StageEnd.
@@ -1286,6 +1357,8 @@ class LifecycleManager(
       message: PartitionSiteChange): PartitionSiteChangeResponse = {
     val shuffleKey = Utils.makeShuffleKey(message.applicationId, message.shuffleId)
     try {
+      logInfo(
+        s"send PartitionSite RPC to site $siteIdx 's Controller, waitSites: ${message.waitSites}")
       endpoint.askSync[PartitionSiteChangeResponse](message, conf.rpcAskTimeout)
     } catch {
       case e: Exception =>
@@ -1398,15 +1471,27 @@ class LifecycleManager(
     appShuffleDeterminateMap.put(appShuffleId, determinate)
   }
 
-  def updatePartitionSite(
-      appUniqueId: String,
-      appShuffleId: Int,
-      newSitePartitionLocation: Array[PartitionLocation]): Unit = {
+  def getShuffleIdFromAppShuffleId(appShuffleId: Int): Int = {
     val shuffleIds = shuffleIdMapping.get(appShuffleId)
-    val shuffleId = shuffleIds.find(e => e._2._1 >= 0) match {
-      case Some((_, (shuffleId, _))) => shuffleId
-      case None => -1
+    if (shuffleIds == null)
+      -1
+    else
+      shuffleIds.find(e => e._2._1 >= 0) match {
+        case Some((_, (shuffleId, _))) => shuffleId
+        case None => -1
+      }
+  }
+
+  def handleUpdatePartitionSite(
+      appUniqueId: String,
+      shuffleId: Int,
+      newSitePartitionLocation: Array[PartitionLocation],
+      waitSites: Int): Unit = {
+    if (shuffleId == -1 || scheduledShuffle.contains(shuffleId)) {
+      return
     }
+
+    scheduledShuffle.add(shuffleId)
     val shuffleLatestPartition = latestPartitionLocation.get(shuffleId)
     val workerNewPartition = new UpdateWorkerResource()
 
@@ -1425,8 +1510,7 @@ class LifecycleManager(
       })
 
     val updateWorker = workerNewPartition.asScala.filter(p => !p._2._1.isEmpty || !p._2._2.isEmpty)
-    scheduledShuffle.add(shuffleId)
-    logInfo(s"Site $siteIdx: update worker $updateWorker")
+    logInfo(s"[Site-$siteIdx] Update worker $updateWorker")
 
     // NOTE: update partition site 时同时在写数据应该不会存在并发问题，会等到更新位置后，再将之前的数据发送到新的 site
     val parallelism =
@@ -1440,16 +1524,17 @@ class LifecycleManager(
             appUniqueId,
             shuffleId,
             oldPartitionLocation,
-            newPartitionLocation))
+            newPartitionLocation,
+            waitSites))
     }
-    val (_, allMapperFinished) = {
-      // Set zero because they are not required
-      commitManager.finishMapperAttempt(shuffleId, 0, 0, 0)
-    }
-    if (allMapperFinished) {
+
+    finishHandleScheduledShuffle.add(shuffleId)
+    val attempts = commitManager.getMapperAttempts(shuffleId)
+    if (!attempts.exists(_ < 0)) {
       // If make schedule decision at the end of the stage, should trigger StageEnd here.
-      logInfo(s"call StageEnd when handling partition site change with shuffleKey:" +
-        s"shuffleId $shuffleId.")
+      logInfo(
+        s"[Site-$siteIdx] call StageEnd when handling partition site change with shuffleKey:" +
+          s"shuffleId $shuffleId.")
       self.send(StageEnd(shuffleId))
     }
   }

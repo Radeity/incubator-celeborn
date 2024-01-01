@@ -146,6 +146,12 @@ public class TransportClientFactory implements Closeable {
     int clientIndex =
         partitionId < 0 ? rand.nextInt(numConnectionsPerPeer) : partitionId % numConnectionsPerPeer;
     TransportClient cachedClient = clientPool.clients[clientIndex];
+    logger.debug(
+        "clientIndex: {}, Find client in client pool: {}/{}, size: {}",
+        clientIndex,
+        clientPool.clients[clientIndex] != null,
+        clientPool.clients[clientIndex],
+        clientPool.clients.length);
 
     if (cachedClient != null && cachedClient.isActive()) {
       // Make sure that the channel will not timeout by updating the last use time of the

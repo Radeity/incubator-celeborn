@@ -20,8 +20,10 @@ package org.apache.celeborn.service.deploy.cluster
 import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
+
 import org.apache.commons.lang3.RandomStringUtils
 import org.junit.Assert
+
 import org.apache.celeborn.client.{LifecycleManager, ShuffleClientImpl}
 import org.apache.celeborn.client.read.MetricsCallback
 import org.apache.celeborn.common.CelebornConf
@@ -49,6 +51,8 @@ trait GeoReadWriteTestBase extends ReadWriteTestBase {
       .set(CelebornConf.READ_LOCAL_SHUFFLE_FILE, false)
       .set("celeborn.data.io.numConnectionsPerPeer", "1")
       .set("celeborn.client.shuffle.manager.port", "19001")
+      .set(CelebornConf.GSS_MODE.key, "true")
+      .set(CelebornConf.TEST_GSS_EARLY_SCHEDULE.key, "true")
 
     val shuffleMapperAttempts = new ConcurrentHashMap[Integer, Array[Int]]
     val rpcEndpointRefs: Array[RpcEndpointRef] = new Array(2)
@@ -76,7 +80,7 @@ trait GeoReadWriteTestBase extends ReadWriteTestBase {
     val OFFSET1 = 0
     val LENGTH1 = DATA1.length
     val dataSize1 = site1ShuffleClient.pushData(shuffleId, 0, 0, 0, DATA1, OFFSET1, LENGTH1, 3, 2)
-    println(s"Map task 0 in site1 push data size $dataSize1 to reduce partition 0")
+    logInfo(s"Map task 0 in site1 push data size $dataSize1 to reduce partition 0")
 
     val STR2 = dataPrefix(1) + RandomStringUtils.random(1024)
     val DATA2 = STR2.getBytes(StandardCharsets.UTF_8)
@@ -115,12 +119,12 @@ trait GeoReadWriteTestBase extends ReadWriteTestBase {
 //    site2ShuffleClient.mapperEnd(shuffleId, 2, 0, 3)
     // ===================================================================================================
 
-    Thread.sleep(1000)
-    val newSitePartitionLocation = Array(site1Locs.get(0), site2Locs.get(1))
-    for (lifecycleManager <- siteLifecycleManager) {
-      lifecycleManager.updatePartitionSite(APP, appShuffleId, newSitePartitionLocation)
-    }
-    logInfo("Update partition site on all lifecycleManagers")
+//    Thread.sleep(1000)
+//    val newSitePartitionLocation = Array(site1Locs.get(0), site1Locs.get(1))
+//    for (lifecycleManager <- siteLifecycleManager) {
+//      lifecycleManager.handleUpdatePartitionSite(APP, shuffleId, newSitePartitionLocation, 1)
+//    }
+//    logInfo("Update partition site on all lifecycleManagers")
     // ===================================================================================================
 
     val metricsCallback = new MetricsCallback {
@@ -137,12 +141,12 @@ trait GeoReadWriteTestBase extends ReadWriteTestBase {
       b1 = inputStream1.read()
     }
     val readBytes1 = outputStream1.toByteArray
-    Assert.assertEquals(LENGTH1 + LENGTH3, readBytes1.length)
     logInfo(s"Fetch data size: ${readBytes1.length}, expected ${LENGTH1 + LENGTH3}")
+    Assert.assertEquals(LENGTH1 + LENGTH3, readBytes1.length)
 
     // read data in partition 1
     val inputStream2 =
-      site2ShuffleClient.readPartition(shuffleId, 1, 0, 0, Integer.MAX_VALUE, metricsCallback)
+      site1ShuffleClient.readPartition(shuffleId, 1, 0, 0, Integer.MAX_VALUE, metricsCallback)
     val outputStream2 = new ByteArrayOutputStream()
     var b2 = inputStream2.read()
     while (b2 != -1) {
@@ -150,8 +154,8 @@ trait GeoReadWriteTestBase extends ReadWriteTestBase {
       b2 = inputStream2.read()
     }
     val readBytes2 = outputStream2.toByteArray
-    Assert.assertEquals(LENGTH2 + LENGTH4, readBytes2.length)
     logInfo(s"Fetch data size: ${readBytes2.length}, expected ${LENGTH2 + LENGTH4}")
+    Assert.assertEquals(LENGTH2 + LENGTH4, readBytes2.length)
 
     Thread.sleep(5000L)
     site1ShuffleClient.shutdown()

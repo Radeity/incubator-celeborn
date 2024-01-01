@@ -1088,6 +1088,7 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
     get(CLIENT_RESULT_PARTITION_SUPPORT_FLOATING_BUFFER)
   def clientFlinkDataCompressionEnabled: Boolean = get(CLIENT_DATA_COMPRESSION_ENABLED)
   def clientShuffleMapPartitionSplitEnabled = get(CLIENT_SHUFFLE_MAPPARTITION_SPLIT_ENABLED)
+  def testGSSEarlySchedule = get(TEST_GSS_EARLY_SCHEDULE)
 
   // //////////////////////////////////////////////////////
   //                    kerberos                         //
@@ -1098,6 +1099,7 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
   // //////////////////////////////////////////////////////
   //                      GSS                            //
   // //////////////////////////////////////////////////////
+  def gssMode: Boolean = get(GSS_MODE)
   def nodeSiteId: Int = get(NODE_SITE_ID)
   def siteNumber: Int = get(SITE_NUMBER)
 }
@@ -1350,7 +1352,7 @@ object CelebornConf extends Logging {
     buildConf("celeborn.network.memory.allocator.verbose.metric")
       .categories("network")
       .version("0.3.0")
-      .doc("Weather to enable verbose metric for pooled allocator.")
+      .doc("Whether to enable verbose metric for pooled allocator.")
       .booleanConf
       .createWithDefault(false)
 
@@ -2989,6 +2991,14 @@ object CelebornConf extends Logging {
       .intConf
       .createWithDefault(502)
 
+  val GSS_MODE: ConfigEntry[Boolean] =
+    buildConf("celeborn.gss.mode.enabled")
+      .categories("worker", "Master", "client")
+      .version("0.4.0")
+      .doc("Whether current mode is GSS mode")
+      .booleanConf
+      .createWithDefault(false)
+
   val NODE_SITE_ID: ConfigEntry[Int] =
     buildConf("celeborn.node.site.id")
       .categories("worker", "Master")
@@ -3003,7 +3013,7 @@ object CelebornConf extends Logging {
       .version("0.4.0")
       .doc("The site number.")
       .intConf
-      .createWithDefault(1)
+      .createWithDefault(2)
 
   val APPLICATION_HEARTBEAT_INTERVAL: ConfigEntry[Long] =
     buildConf("celeborn.client.application.heartbeatInterval")
@@ -3209,6 +3219,15 @@ object CelebornConf extends Logging {
       .categories("test", "worker")
       .version("0.3.0")
       .doc("Whether to test push primary data timeout")
+      .booleanConf
+      .createWithDefault(false)
+
+  val TEST_GSS_EARLY_SCHEDULE: ConfigEntry[Boolean] =
+    buildConf("celeborn.test.gss.early.schedule")
+      .internal
+      .categories("test", "master")
+      .version("0.3.0")
+      .doc("Whether make internal schedule decision for test")
       .booleanConf
       .createWithDefault(false)
 

@@ -41,7 +41,6 @@ import org.apache.celeborn.client.ShuffleClient;
 import org.apache.celeborn.common.CelebornConf;
 import org.apache.celeborn.common.protocol.PartitionLocation;
 import org.apache.celeborn.common.protocol.ShuffleMode;
-import org.apache.celeborn.common.protocol.message.ControlMessages;
 import org.apache.celeborn.common.rpc.RpcEndpointRef;
 import org.apache.celeborn.common.util.ThreadUtils;
 import org.apache.celeborn.reflect.DynMethods;
@@ -97,6 +96,7 @@ public class SparkShuffleManager implements ShuffleManager {
   }
 
   private List<LifecycleManager> siteLifecycleManager;
+  //  private ShuffleClient[] shuffleClients = new ShuffleClient[2];
   private ShuffleClient shuffleClient;
   private volatile SortShuffleManager _sortShuffleManager;
   private final ConcurrentHashMap.KeySetView<Integer, Boolean> sortShuffleIds =
@@ -108,6 +108,7 @@ public class SparkShuffleManager implements ShuffleManager {
 
   private long sendBufferPoolCheckInterval;
   private long sendBufferPoolExpireTimeout;
+  private int siteNumber;
 
   private ExecutorShuffleIdTracker shuffleIdTracker = new ExecutorShuffleIdTracker();
 
@@ -134,6 +135,7 @@ public class SparkShuffleManager implements ShuffleManager {
     }
     this.sendBufferPoolCheckInterval = celebornConf.clientPushSendBufferPoolExpireCheckInterval();
     this.sendBufferPoolExpireTimeout = celebornConf.clientPushSendBufferPoolExpireTimeout();
+    this.siteNumber = celebornConf.siteNumber();
   }
 
   private SortShuffleManager sortShuffleManager() {
@@ -156,7 +158,6 @@ public class SparkShuffleManager implements ShuffleManager {
     if (isDriver && siteLifecycleManager == null) {
       synchronized (this) {
         if (siteLifecycleManager == null) {
-          int siteNumber = celebornConf.siteNumber();
           siteLifecycleManager = new ArrayList<>(siteNumber);
           // A shared-map for all lifecycleManager
           ConcurrentHashMap<Integer, int[]> shuffleMapperAttempts = new ConcurrentHashMap<>();
@@ -242,6 +243,11 @@ public class SparkShuffleManager implements ShuffleManager {
       }
     }
     // For Spark executor side cleanup shuffle related info.
+    //    if (shuffleClients != null) {
+    //      for (ShuffleClient shuffleClient : shuffleClients) {
+    //        shuffleIdTracker.unregisterAppShuffleId(shuffleClient, appShuffleId);
+    //      }
+    //    }
     if (shuffleClient != null) {
       shuffleIdTracker.unregisterAppShuffleId(shuffleClient, appShuffleId);
     }
@@ -255,6 +261,13 @@ public class SparkShuffleManager implements ShuffleManager {
 
   @Override
   public void stop() {
+    //    if (shuffleClients != null) {
+    //      for (ShuffleClient shuffleClient : shuffleClients) {
+    //        shuffleClient.shutdown();
+    //        ShuffleClient.reset();
+    //        shuffleClient = null;
+    //      }
+    //    }
     if (shuffleClient != null) {
       shuffleClient.shutdown();
       ShuffleClient.reset();
@@ -282,6 +295,16 @@ public class SparkShuffleManager implements ShuffleManager {
         @SuppressWarnings("unchecked")
         CelebornShuffleHandle<K, V, ?> h = ((CelebornShuffleHandle<K, V, ?>) handle);
         String host = org.apache.celeborn.common.util.Utils.localHostName(celebornConf);
+        //        int siteIdx = (int) (mapId % siteNumber); // nodeSiteMap.getOrDefault(host, 0);
+        //        shuffleClients[siteIdx] =
+        //            ShuffleClient.get(
+        //                h.appUniqueId(),
+        //                h.lifecycleManagerHost(),
+        //                h.lifecycleManagerPort() + siteIdx,
+        //                celebornConf,
+        //                h.userIdentifier(),
+        //                siteIdx);
+        //        ShuffleClient shuffleClient = shuffleClients[siteIdx];
         int siteIdx = nodeSiteMap.getOrDefault(host, 0);
         shuffleClient =
             ShuffleClient.get(
@@ -291,6 +314,7 @@ public class SparkShuffleManager implements ShuffleManager {
                 celebornConf,
                 h.userIdentifier());
         int shuffleId = SparkUtils.celebornShuffleId(shuffleClient, h, context, true);
+        logger.info("mapId: " + mapId + ", get shuffleId: " + shuffleId + " from site: " + siteIdx);
         shuffleIdTracker.track(h.shuffleId(), shuffleId);
 
         if (ShuffleMode.SORT.equals(celebornConf.shuffleWriterMode())) {
@@ -457,23 +481,39 @@ public class SparkShuffleManager implements ShuffleManager {
     return this.siteLifecycleManager.get(0);
   }
 
-  public void updatePartitionSite(String appUniqueId, int shuffleId, String[] partitionSite) {
+  public void updatePartitionSite(String appUniqueId, int appShuffleId, String[] partitionSite) {
     int numPartition = partitionSite.length;
     PartitionLocation[] newSitePartitionLocation = new PartitionLocation[numPartition];
+    int[] shuffleIds = new int[siteNumber];
+    int waitSites = 0;
+    for (int siteIdx = 0; siteIdx < siteNumber; siteIdx++) {
+      shuffleIds[siteIdx] =
+          siteLifecycleManager.get(siteIdx).getShuffleIdFromAppShuffleId(appShuffleId);
+      if (shuffleIds[siteIdx] != -1) {
+        waitSites += 1;
+      }
+    }
+
     for (int partitionIdx = 0; partitionIdx < numPartition; partitionIdx++) {
       int newSite = Integer.parseInt(partitionSite[partitionIdx]);
       PartitionLocation newLocation =
           siteLifecycleManager
               .get(newSite)
               .latestPartitionLocation()
-              .get(shuffleId)
+              .get(shuffleIds[newSite])
               .get(partitionIdx);
       newSitePartitionLocation[partitionIdx] = newLocation;
     }
 
     // Broadcast to every site's lifecycleManager
-    for (LifecycleManager lifecycleManager : siteLifecycleManager) {
-      lifecycleManager.updatePartitionSite(appUniqueId, shuffleId, newSitePartitionLocation);
+    for (int siteIdx = 0; siteIdx < siteNumber; siteIdx++) {
+      if (shuffleIds[siteIdx] == -1) {
+        continue;
+      }
+      siteLifecycleManager
+          .get(siteIdx)
+          .handleUpdatePartitionSite(
+              appUniqueId, shuffleIds[siteIdx], newSitePartitionLocation, waitSites - 1);
     }
   }
 }

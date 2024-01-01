@@ -101,11 +101,14 @@ class ReducePartitionCommitHandler(
       stageEndShuffleSet.add(shuffleId)
     }
 
+    logInfo(s"Stage finally end, reply file group request")
+
     val requests = getReducerFileGroupRequest.remove(shuffleId)
     // Set empty HashSet during register shuffle.
     // In case of stage with no shuffle data, register shuffle will not be called,
     // so here we still need to check null.
     if (requests != null && !requests.isEmpty) {
+      logInfo(s"Have to reply!")
       requests.asScala.foreach(replyGetReducerFileGroup(_, shuffleId))
     }
   }
@@ -141,7 +144,7 @@ class ReducePartitionCommitHandler(
     recordWorkerFailure(commitFailedWorkers)
     // reply
     if (!dataLost) {
-      logInfo(s"Succeed to handle stageEnd for $shuffleId.")
+      println(s"Succeed to handle stageEnd for $shuffleId.")
       // record in stageEndShuffleSet
       setStageEnd(shuffleId)
     } else {
@@ -303,8 +306,10 @@ class ReducePartitionCommitHandler(
       getReducerFileGroupRequest.synchronized {
         // If setStageEnd() called after isStageEnd and before got lock, should reply here.
         if (isStageEnd(shuffleId)) {
+          logInfo(s"Stage End, reply immediately")
           replyGetReducerFileGroup(context, shuffleId)
         } else {
+          logInfo(s"Stage Not End, reply later")
           getReducerFileGroupRequest.get(shuffleId).add(context)
         }
       }

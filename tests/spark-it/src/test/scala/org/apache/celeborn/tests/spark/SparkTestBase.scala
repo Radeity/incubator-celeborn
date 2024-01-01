@@ -57,7 +57,14 @@ trait SparkTestBase extends AnyFunSuite
     sparkConf.set("spark.shuffle.service.enabled", "false")
     sparkConf.set("spark.sql.adaptive.skewJoin.enabled", "false")
     sparkConf.set("spark.sql.adaptive.localShuffleReader.enabled", "false")
-    sparkConf.set(s"spark.${MASTER_ENDPOINTS.key}", masterInfo._1.rpcEnv.address.toString)
+    val endpoints: String =
+      if (!multiMasterInfos.isEmpty) {
+        multiMasterInfos.keys.map(_.rpcEnv.address.toString).mkString(",")
+      } else {
+        masterInfo._1.rpcEnv.address.toString
+      }
+    logInfo(s"spark celeborn endpoints: $endpoints")
+    sparkConf.set(s"spark.${MASTER_ENDPOINTS.key}", endpoints)
     sparkConf.set(s"spark.${SPARK_SHUFFLE_WRITER_MODE.key}", mode.toString)
     sparkConf
   }

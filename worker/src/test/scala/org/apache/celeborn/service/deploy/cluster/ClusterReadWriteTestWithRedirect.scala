@@ -18,6 +18,7 @@
 package org.apache.celeborn.service.deploy.cluster
 
 class ClusterReadWriteTestWithRedirect extends GeoReadWriteTestBase {
+
   test(s"test MiniCluster With Redirect operation") {
     testReadWriteWithRedirect()
   }
@@ -26,7 +27,4 @@ class ClusterReadWriteTestWithRedirect extends GeoReadWriteTestBase {
     testMultiSiteReadWrite()
   }
 
-  test(s"test geo-distributed cluster with delay schedule decision") {
-    // TODO
-  }
 }

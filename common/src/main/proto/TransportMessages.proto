@@ -408,6 +408,7 @@ message PbPartitionSiteChange {
   int32 shuffleId = 2;
   repeated PbPartitionLocation oldPartitionLocations = 3;
   repeated PbPartitionLocation newPartitionLocations = 4;
+  int32 waitSites = 5;
 }
 
 message PbPartitionSiteChangeResponse {

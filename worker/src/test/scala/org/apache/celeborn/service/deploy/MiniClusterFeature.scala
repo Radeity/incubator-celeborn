@@ -33,6 +33,7 @@ trait MiniClusterFeature extends Logging {
   val masterHttpPort = new AtomicInteger(22378)
   val workerHttpPort = new AtomicInteger(12378)
   var masterInfo: (Master, Thread) = _
+  var multiMasterInfos = new mutable.HashMap[Master, Thread]()
   val workerInfos = new mutable.HashMap[Worker, Thread]()
 
   def runnerWrap[T](code: => T): Thread = new Thread(() => {
@@ -132,13 +133,15 @@ trait MiniClusterFeature extends Logging {
       val master = createMaster(masterConf)
       val masterThread = runnerWrap(master.rpcEnv.awaitTermination())
       masterThread.start()
-      masterInfo = (master, masterThread)
-      Thread.sleep(5000L)
+      multiMasterInfos.put(master, masterThread)
+      Thread.sleep(3000L)
 
       val siteWorkers: collection.mutable.Set[Worker] = mutable.Set[Worker]()
       val workerConf = Map(
         "celeborn.master.endpoints" -> masterEndpoints,
-        "celeborn.node.site.id" -> i.toString)
+        "celeborn.node.site.id" -> i.toString,
+        "celeborn.site.number" -> masterNum.toString,
+        "celeborn.gss.mode.enable" -> "true")
       (1 to workerNumPerSite).foreach { _ =>
         val worker = createWorker(workerConf)
         val workerThread = runnerWrap(worker.initialize())
@@ -148,7 +151,7 @@ trait MiniClusterFeature extends Logging {
       }
       siteNodeInfos(master) = siteWorkers
     }
-    Thread.sleep(5000L)
+    Thread.sleep(3000L)
     workerInfos.foreach { case (worker, _) => assert(worker.registered.get()) }
 
     siteNodeInfos
@@ -163,8 +166,16 @@ trait MiniClusterFeature extends Logging {
     }
 
     // shutdown masters
-    masterInfo._1.stop(CelebornExitKind.EXIT_IMMEDIATELY)
-    masterInfo._1.rpcEnv.shutdown()
+    if (multiMasterInfos.nonEmpty) {
+      multiMasterInfos.foreach {
+        case (master, _) =>
+          master.stop(CelebornExitKind.EXIT_IMMEDIATELY)
+          master.rpcEnv.shutdown()
+      }
+    } else {
+      masterInfo._1.stop(CelebornExitKind.EXIT_IMMEDIATELY)
+      masterInfo._1.rpcEnv.shutdown()
+    }
 
     // interrupt threads
     Thread.sleep(5000)
@@ -174,7 +185,15 @@ trait MiniClusterFeature extends Logging {
         thread.interrupt()
     }
     workerInfos.clear()
-    masterInfo._2.interrupt()
+    if (multiMasterInfos.nonEmpty) {
+      multiMasterInfos.foreach {
+        case (_, thread) =>
+          thread.interrupt()
+      }
+    } else {
+      masterInfo._2.interrupt()
+    }
+
     MemoryManager.reset()
   }
 }

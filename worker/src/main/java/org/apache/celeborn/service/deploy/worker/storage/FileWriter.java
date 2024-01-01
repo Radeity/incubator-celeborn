@@ -268,6 +268,7 @@ public abstract class FileWriter implements DeviceObserver {
     }
 
     try {
+      logger.debug("wait for pending writes: {}", numPendingWrites);
       waitOnNoPending(numPendingWrites);
       closed = true;
 

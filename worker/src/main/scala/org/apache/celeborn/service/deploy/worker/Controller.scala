@@ -17,26 +17,28 @@
 
 package org.apache.celeborn.service.deploy.worker
 
+import java.io.IOException
+import java.util.{ArrayList => jArrayList, HashMap => jHashMap, List => jList, Set => jSet}
+import java.util.concurrent._
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicIntegerArray, AtomicReference}
+import java.util.function.BiFunction
+
+import scala.collection.JavaConverters._
+
 import io.netty.util.{HashedWheelTimer, Timeout, TimerTask}
+import org.roaringbitmap.RoaringBitmap
+
 import org.apache.celeborn.common.CelebornConf
 import org.apache.celeborn.common.identity.UserIdentifier
 import org.apache.celeborn.common.internal.Logging
 import org.apache.celeborn.common.meta.{WorkerInfo, WorkerPartitionLocationInfo}
 import org.apache.celeborn.common.metrics.MetricsSystem
+import org.apache.celeborn.common.protocol.{PartitionLocation, PartitionSplitMode, PartitionType, StorageInfo}
 import org.apache.celeborn.common.protocol.message.ControlMessages._
 import org.apache.celeborn.common.protocol.message.StatusCode
-import org.apache.celeborn.common.protocol.{PartitionLocation, PartitionSplitMode, PartitionType, StorageInfo}
 import org.apache.celeborn.common.rpc._
 import org.apache.celeborn.common.util.{JavaUtils, Utils}
 import org.apache.celeborn.service.deploy.worker.storage.{FileWriter, MapPartitionFileWriter, StorageManager}
-import org.roaringbitmap.RoaringBitmap
-
-import java.io.IOException
-import java.util.concurrent._
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicIntegerArray, AtomicReference}
-import java.util.function.BiFunction
-import java.util.{ArrayList => jArrayList, HashMap => jHashMap, List => jList, Set => jSet}
-import scala.collection.JavaConverters._
 
 private[deploy] class Controller(
     override val rpcEnv: RpcEnv,
@@ -131,10 +133,16 @@ private[deploy] class Controller(
           applicationId,
           shuffleId,
           oldPartitionLocations,
-          newPartitionLocations) =>
+          newPartitionLocations,
+          waitSites) =>
       val shuffleKey = Utils.makeShuffleKey(applicationId, shuffleId)
-      logInfo(s"Received PartitionSiteChange request, $shuffleKey, new partition location: $newPartitionLocations.")
-      handlePartitionSiteChange(context, shuffleKey, oldPartitionLocations, newPartitionLocations)
+      logInfo(s"Received PartitionSiteChange request, $shuffleKey, waitSites: $waitSites)")
+      handlePartitionSiteChange(
+        context,
+        shuffleKey,
+        oldPartitionLocations,
+        newPartitionLocations,
+        waitSites)
   }
 
   private def handleReserveSlots(
@@ -310,11 +318,14 @@ private[deploy] class Controller(
                 }
 
                 val fileWriter = location.asInstanceOf[WorkingPartition].getFileWriter
+                logInfo(
+                  s"partition $uniqueId redirectedFlag: $redirectFlag, fileWriter: ${fileWriter.getFile.getName}")
                 val bytes: Long =
                   if (!redirectFlag) {
                     waitMapPartitionRegionFinished(fileWriter, conf.workerShuffleCommitTimeout)
                     fileWriter.close()
                   } else 0L
+                logInfo(s"handle commit single file $uniqueId done, file size: $bytes")
 
                 if (bytes > 0L) {
                   if (fileWriter.getStorageInfo == null) {
@@ -400,7 +411,7 @@ private[deploy] class Controller(
           replicaIds))
       return
     }
-
+    logDebug(s"Receive commitFiles msg: $primaryIds")
     val shuffleCommitTimeout = conf.workerShuffleCommitTimeout
 
     shuffleCommitInfos.putIfAbsent(shuffleKey, JavaUtils.newConcurrentHashMap[Long, CommitInfo]())
@@ -535,6 +546,7 @@ private[deploy] class Controller(
               s"${committedReplicaIds.size()} committed replica partitions, " +
               s"${emptyFileReplicaIds.size()} empty replica partitions, " +
               s"${failedReplicaIds.size()} failed replica partitions.")
+          logInfo(s"committedPrimaryIds: $committedPrimaryIdList")
           CommitFilesResponse(
             StatusCode.SUCCESS,
             committedPrimaryIdList,
@@ -718,7 +730,8 @@ private[deploy] class Controller(
       context: RpcCallContext,
       shuffleKey: String,
       oldPartitionLocations: jList[PartitionLocation],
-      newPartitionLocations: jList[PartitionLocation]): Unit = {
+      newPartitionLocations: jList[PartitionLocation],
+      waitSites: Int): Unit = {
     val newShuffleRedirectMap = new jHashMap[PartitionLocation, PartitionLocation]()
     val partitionNum: Int = oldPartitionLocations.size()
     for (i <- 0 until partitionNum) {
@@ -735,7 +748,11 @@ private[deploy] class Controller(
 
     logInfo(s"new partitionRedirectMap $newShuffleRedirectMap")
     // flush and send all received data once to new partition site
-    triggerPartitionDataTransfer(shuffleKey, oldPartitionLocations, newPartitionLocations)
+    triggerPartitionDataTransfer(
+      shuffleKey,
+      oldPartitionLocations,
+      newPartitionLocations,
+      waitSites)
 
     context.reply(
       PartitionSiteChangeResponse(StatusCode.SUCCESS))
@@ -744,29 +761,35 @@ private[deploy] class Controller(
   private def triggerPartitionDataTransfer(
       shuffleKey: String,
       oldLocations: jList[PartitionLocation],
-      newLocations: jList[PartitionLocation]): Unit = {
+      newLocations: jList[PartitionLocation],
+      waitSites: Int): Unit = {
     val partitionNum = oldLocations.size()
     for (i <- 0 until partitionNum) {
       // First, flush all local datas in flushBuffer
+      logInfo(
+        s"[Partition-$i] shuffleKey: $shuffleKey, partition location info: $partitionLocationInfo")
       val oldLocation: PartitionLocation =
         partitionLocationInfo.getPrimaryLocation(shuffleKey, oldLocations.get(i).getUniqueId)
       val newLocation: PartitionLocation = newLocations.get(i)
       val fileWriter: FileWriter = oldLocation.asInstanceOf[WorkingPartition].getFileWriter
       if (!oldLocation.equals(newLocation)) {
         val bytes: Long = fileWriter.close()
-        logInfo(s"Final flush old partition $oldLocation, file size $bytes bytes")
+        logInfo(
+          s"Final flush old partition ${oldLocation.getUniqueId} cuz redirection, file size $bytes bytes")
 
         // Second, send local data to new site
         fetchHandler.handleFetchAndRedirect(shuffleKey, oldLocation, newLocation)
       } else {
+        logInfo(
+          s"Selected as new partition ${oldLocation.getUniqueId}, no need to re-direct, wait for $waitSites other sites sending data")
         // update pending write and wait for other sited sending re-direct data(once)
-        for (_ <- 0 until conf.siteNumber) {
+        for (_ <- 0 until waitSites) {
           fileWriter.incrementPendingWrites()
         }
       }
     }
 
     // NOTE: The following step may be done by new site's lifecycleManager after PartitionSiteChange RPC is successfully handled
-    // (deprecated) Third, send mapperEnd to new Worker
+    // (deprecated) Finally, send mapperEnd to new Worker
   }
 }

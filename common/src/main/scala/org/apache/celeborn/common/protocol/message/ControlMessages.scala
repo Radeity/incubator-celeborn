@@ -438,7 +438,8 @@ object ControlMessages extends Logging {
       applicationId: String,
       shuffleId: Int,
       oldPartitionLocations: util.List[PartitionLocation],
-      newPartitionLocations: util.List[PartitionLocation])
+      newPartitionLocations: util.List[PartitionLocation],
+      waitSites: Int)
     extends WorkerMessage
 
   case class PartitionSiteChangeResponse(
@@ -801,7 +802,8 @@ object ControlMessages extends Logging {
           applicationId,
           shuffleId,
           oldPartitionLocations,
-          newPartitionLocations) =>
+          newPartitionLocations,
+          waitSites) =>
       val payload = PbPartitionSiteChange.newBuilder()
         .setApplicationId(applicationId)
         .setShuffleId(shuffleId)
@@ -809,6 +811,7 @@ object ControlMessages extends Logging {
           .map(PbSerDeUtils.toPbPartitionLocation).toList.asJava)
         .addAllNewPartitionLocations(newPartitionLocations.asScala
           .map(PbSerDeUtils.toPbPartitionLocation).toList.asJava)
+        .setWaitSites(waitSites)
         .build().toByteArray
       new TransportMessage(MessageType.PARTITION_SITE_CHANGE, payload)
 
@@ -1138,7 +1141,8 @@ object ControlMessages extends Logging {
               .map(PbSerDeUtils.fromPbPartitionLocation).toList.asJava),
           new util.ArrayList[PartitionLocation](
             pbPartitionSiteChange.getNewPartitionLocationsList.asScala
-              .map(PbSerDeUtils.fromPbPartitionLocation).toList.asJava))
+              .map(PbSerDeUtils.fromPbPartitionLocation).toList.asJava),
+          pbPartitionSiteChange.getWaitSites)
 
       case PARTITION_SITE_CHANGE_RESPONSE_VALUE =>
         val pbPartitionSiteChangeResponse =

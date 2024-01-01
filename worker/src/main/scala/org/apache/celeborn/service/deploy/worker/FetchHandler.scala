@@ -63,13 +63,11 @@ class FetchHandler(
   var partitionsSorter: PartitionFilesSorter = _
   var registered: AtomicBoolean = new AtomicBoolean(false)
 
-  var readLocalShufflePool: ThreadPoolExecutor = ThreadUtils.newDaemonCachedThreadPool(
-    "local-shuffle-reader-thread",
-    conf.readLocalShuffleThreads,
-    60)
+  var redirectThreadPool: ThreadPoolExecutor = _
   var fetchMaxReqsInFlight: Int = conf.clientFetchMaxReqsInFlight
   val pushDataTimeout: Long = conf.pushDataTimeoutMs
   var pushClientFactory: TransportClientFactory = _
+  var workerReplicateRandomConnectionEnabled: Boolean = _
 
   def init(worker: Worker): Unit = {
 
@@ -85,6 +83,8 @@ class FetchHandler(
     this.partitionsSorter = worker.partitionsSorter
     this.registered = worker.registered
     this.pushClientFactory = worker.pushClientFactory
+    this.redirectThreadPool = worker.replicateThreadPool
+    this.workerReplicateRandomConnectionEnabled = worker.conf.workerReplicateRandomConnectionEnabled
   }
 
   def getRawFileInfo(
@@ -220,7 +220,7 @@ class FetchHandler(
     val offsets = fileInfo.getChunkOffsets
     val numChunks = fileInfo.numChunks()
     // only consider read local reduce partition
-    logInfo(s"Do fetch and redirect operation $shuffleKey $fileName $numChunks")
+    logDebug(s"Do fetch and redirect operation $shuffleKey $fileName $numChunks")
 
     val pbStreamHandlerBuilder =
       PbStreamHandler.newBuilder.setStreamId(streamId).setNumChunks(numChunks)
@@ -235,7 +235,7 @@ class FetchHandler(
     // Second, read local partition
     val shuffleChannel: FileChannel =
       FileChannelUtils.openReadableFileChannel(pbStreamHandler.getFullPath)
-    val client: TransportClient = pushClientFactory.createClient(newLoc.getHost, newLoc.getPushPort)
+    val client: TransportClient = getClient(newLoc.getHost, newLoc.getPushPort, newLoc.getId)
     var currentIndex = 0
     val future: CompletableFuture[Void] = new CompletableFuture[Void]()
     val counter: AtomicInteger = new AtomicInteger(numChunks)
@@ -245,12 +245,11 @@ class FetchHandler(
     while (currentIndex < numChunks) {
       val toFetch: Int = Math.min(fetchMaxReqsInFlight, numChunks - currentIndex)
       val chunkIndex = currentIndex
-      logInfo(s"Trigger local reader fetch chunk with $chunkIndex and fetch $toFetch chunks")
+      logDebug(s"[Partition-${newLoc.getUniqueId}] Trigger local reader fetch chunk with $chunkIndex and fetch $toFetch chunks")
 
       for (i <- 0 until toFetch) {
         val offset: Long = offsets.get(chunkIndex + i)
         val length: Long = offsets.get(chunkIndex + i + 1) - offset
-        logInfo(s"Read $chunkIndex offset $offset length $length")
         // A chunk must be smaller than INT.MAX_VALUE
         val buffer: ByteBuffer = ByteBuffer.allocate(length.toInt)
         while (buffer.hasRemaining) {
@@ -258,30 +257,51 @@ class FetchHandler(
           if (-1 == shuffleChannel.read(buffer))
             throw new CelebornIOException("Read local file " + filePath + " failed")
         }
+        logDebug(
+          s"[Partition-${newLoc.getUniqueId}] Read $chunkIndex offset $offset length $length")
         buffer.flip
         // Third, push local partition to new location
-        val callback: RpcResponseCallback = new RpcResponseCallback {
-          override def onSuccess(response: ByteBuffer): Unit = {
-            val currentCounter: Int = counter.decrementAndGet()
-            logInfo(s"Fetch and Redirect(send) chunk data to newLocation ${newLoc.getHost}:${newLoc.getPushPort} success, current counter: $currentCounter")
-            if (currentCounter == 0) {
-              future.complete(null)
+        val body = new NettyManagedBuffer(Unpooled.wrappedBuffer(buffer))
+        body.retain()
+        redirectThreadPool.submit(new Runnable {
+          override def run(): Unit = {
+            val callback: RpcResponseCallback = new RpcResponseCallback {
+              override def onSuccess(response: ByteBuffer): Unit = {
+                if (response.remaining() > 0) {
+                  val resp = ByteBuffer.allocate(response.remaining())
+                  resp.put(response)
+                  resp.flip()
+                }
+                val currentCounter: Int = counter.decrementAndGet()
+                logDebug(s"[Partition-${newLoc.getUniqueId}] Fetch and Redirect(send) chunk data to newLocation ${newLoc.getHost}:${newLoc.getPushPort} success, current counter: $currentCounter, response: $response")
+                if (currentCounter == 0) {
+                  future.complete(null)
+                }
+              }
+
+              override def onFailure(e: Throwable): Unit = {
+                logError(
+                  s"Fetch and Redirect(send) chunk data to newLocation $newLoc failed, cause: ${e.getMessage}")
+                future.completeExceptionally(e)
+              }
+            }
+
+            try {
+              val newPushData: PushData = new PushData(
+                0,
+                shuffleKey,
+                newLoc.getUniqueId,
+                body)
+              logDebug(
+                s"[Partition-${newLoc.getUniqueId}] Start pushing index ${chunkIndex + i} to newLocation")
+              client.pushData(newPushData, pushDataTimeout, callback)
+            } catch {
+              case e: Exception =>
+                body.release()
+                logError("Send local data to new site failed", e)
             }
           }
-
-          override def onFailure(e: Throwable): Unit = {
-            logError(
-              s"Fetch and Redirect(send) chunk data to newLocation $newLoc failed, cause: ${e.getMessage}")
-            future.completeExceptionally(e)
-          }
-        }
-        logInfo(s"Start pushing index ${chunkIndex + i} to newLocation")
-        val newPushData: PushData = new PushData(
-          0,
-          shuffleKey,
-          newLoc.getUniqueId,
-          new NettyManagedBuffer(Unpooled.wrappedBuffer(buffer)))
-        client.pushData(newPushData, pushDataTimeout, callback)
+        })
       }
       currentIndex += toFetch
     }
@@ -294,21 +314,28 @@ class FetchHandler(
 
         // Fifth, send RPC message to new location to notify once-redirect steps done
         val (appUniqueId, shuffleId) = Utils.splitShuffleKey(shuffleKey)
-        logInfo(s"send RPC message to new location to notify once-redirect steps done for shuffle $shuffleKey")
-        client.sendRpcSync(
+        logDebug(s"[Partition-${newLoc.getUniqueId}] Send RPC message to new location to notify once-redirect steps done for shuffle $shuffleKey")
+        client.sendRpc(
           new TransportMessage(
             MessageType.PARTITION_SITE_CHANGE,
             PbPartitionSiteChange.newBuilder()
               .setApplicationId(appUniqueId)
               .setShuffleId(shuffleId)
-//              .addOldPartitionLocations(PbSerDeUtils.toPbPartitionLocation(oldLoc))  // No need
               .addNewPartitionLocations(PbSerDeUtils.toPbPartitionLocation(newLoc))
               .build()
-              .toByteArray).toByteBuffer,
-            conf.pushDataTimeoutMs
-        )
+              .toByteArray).toByteBuffer)
+//          conf.pushDataTimeoutMs)
+        logDebug(s"[Partition-${newLoc.getUniqueId}] Receive resp for PARTITION_SITE_CHANGE done")
       }
     })
+  }
+
+  private def getClient(host: String, port: Int, partitionId: Int): TransportClient = {
+    if (workerReplicateRandomConnectionEnabled) {
+      pushClientFactory.createClient(host, port)
+    } else {
+      pushClientFactory.createClient(host, port, partitionId)
+    }
   }
 
   private def handleOpenStreamInternal(

@@ -115,7 +115,8 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
           pushData,
           pushData.requestId,
           () => {
-            logInfo(s"Receive push data request, data size: ${pushData.body().size()}")
+            logDebug(
+              s"Receive push data request, parition:${pushData.partitionUniqueId}, data size:${pushData.body().size()}")
             val callback = new SimpleRpcResponseCallback(
               client,
               pushData.requestId,
@@ -137,13 +138,16 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
           client,
           pushMergedData,
           pushMergedData.requestId,
-          () =>
+          () => {
+            logDebug(
+              s"Receive push merged data request, data size: ${pushMergedData.body().size()}")
             handlePushMergedData(
               pushMergedData,
               new SimpleRpcResponseCallback(
                 client,
                 pushMergedData.requestId,
-                pushMergedData.shuffleKey)))
+                pushMergedData.shuffleKey))
+          })
       case rpcRequest: RpcRequest => handleRpcRequest(client, rpcRequest)
     }
 
@@ -234,8 +238,8 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
     if (redirectPartitionMap != null) {
       val newLocation: PartitionLocation = redirectPartitionMap.getOrDefault(location, null)
       if (newLocation != null && !newLocation.equals(location)) {
-        val redirectPromise: Promise[Unit] = Promise[Unit]
         pushData.body().retain()
+        val redirectPromise: Promise[Unit] = Promise[Unit]
         val newPushDataMsg =
           new PushData(pushData.mode, pushData.shuffleKey, newLocation.getUniqueId, pushData.body())
         redirectRequest(newPushDataMsg, newLocation, redirectPromise)
@@ -247,7 +251,6 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
               ByteBuffer.wrap(Array[Byte](StatusCode.PUSH_REMOTE_SITE.getValue)))
           case Failure(e) => callbackWithTimer.onFailure(e)
         }
-        pushData.body().release()
         return
       }
     }
@@ -540,6 +543,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
             } else {
               batchOffsets(i + 1) - batchOffsets(i)
             }
+          body.retain()
           val batchBody: ByteBuf = body.slice(offset, length)
           val newBody = new NettyManagedBuffer(Unpooled.wrappedBuffer(batchBody))
           val newPushDataMsg = new PushData(
@@ -767,7 +771,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
       msg match {
         case pushData: PushData =>
           logInfo(
-            s"Redirect and send new PushData request of partition ${pushData.partitionUniqueId} to new partition ${newLocation.hostAndPushPort()}")
+            s"Redirect and send new PushData request of partition ${pushData.partitionUniqueId} to new partition ${newLocation.hostAndPushPort()}, length: ${pushData.body().size()}")
           client.pushData(
             pushData,
             shufflePushDataTimeout.get(pushData.shuffleKey),
@@ -780,10 +784,10 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
       }
     } catch {
       case e: Exception =>
-        // NOTE: 不用 release，不同于 replica 是开一个线程去做，所以要在复制之前先 retain，然后复制完成再 release，
+        // NOTE: replica 开一个线程去做，要在复制之前先 retain，然后复制完成再 release，
         //  防止主线程执行完 handlePush 就 release buffer 将其回收掉；
-        //  然而, redirect 操作是在主线程进行的，不需要引入额外的计数。
-//        msg.body().release()
+        //  另外需要 release 的场景为发生异常，不会执行到 handleCore 的 release
+        msg.body().release()
         logError(
           s"Redirect and push data to location $newLocation failed",
           e)
@@ -850,6 +854,8 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
       shuffleKey: String)
     extends RpcResponseCallback {
     override def onSuccess(response: ByteBuffer): Unit = {
+//      logDebug(
+//        s"active: ${client.getChannel.isActive}, remote address: ${client.getChannel.remoteAddress()}")
       client.getChannel.writeAndFlush(new RpcResponse(
         requestId,
         new NioManagedBuffer(response)))
@@ -957,15 +963,17 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
       rpcRequest.body().nioByteBuffer()).getParsedPayload.asInstanceOf[GeneratedMessageV3]
     val handler = pbMsg match {
       case psc: PbPartitionSiteChange =>
-        val p: PartitionLocation = PbSerDeUtils.fromPbPartitionLocation(psc.getNewPartitionLocations(0))
+        val p: PartitionLocation =
+          PbSerDeUtils.fromPbPartitionLocation(psc.getNewPartitionLocations(0))
+        val shuffleKey = Utils.makeShuffleKey(psc.getApplicationId, psc.getShuffleId)
         () =>
           handlePartitionRedirectOnceDone(
-            Utils.makeShuffleKey(psc.getApplicationId, psc.getShuffleId),
+            shuffleKey,
             p.getUniqueId,
             new SimpleRpcResponseCallback(
               client,
               requestId,
-              ""))
+              shuffleKey))
       case _ =>
         val (msg, isLegacy, messageType, mode, shuffleKey, partitionUniqueId, checkSplit) =
           mapPartitionRpcRequest(pbMsg, rpcRequest)
@@ -989,12 +997,12 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
       client,
       rpcRequest,
       requestId,
-      handler
-    )
+      handler)
   }
 
-  private def mapPartitionRpcRequest(msg: GeneratedMessageV3, rpcRequest: RpcRequest)
-      : Tuple7[Message, Boolean, Type, Mode, String, String, Boolean] = {
+  private def mapPartitionRpcRequest(
+      msg: GeneratedMessageV3,
+      rpcRequest: RpcRequest): Tuple7[Message, Boolean, Type, Mode, String, String, Boolean] = {
     try {
       msg match {
         case p: PbPushDataHandShake =>
@@ -1060,12 +1068,14 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
     }
   }
 
-  private def handlePartitionRedirectOnceDone(shuffleKey: String, partitionUniqueId: String,
-                                              callback: RpcResponseCallback): Unit = {
+  private def handlePartitionRedirectOnceDone(
+      shuffleKey: String,
+      partitionUniqueId: String,
+      callback: RpcResponseCallback): Unit = {
     val location = partitionLocationInfo.getPrimaryLocation(shuffleKey, partitionUniqueId)
     val fileWriter = location.asInstanceOf[WorkingPartition].getFileWriter
-    logInfo(s"Current partition $partitionUniqueId receive notification that one site has sent all re-direct data once")
     fileWriter.decrementPendingWrites()
+    logDebug(s"Current partition $partitionUniqueId receive notification that one site has sent all re-direct data once")
     callback.onSuccess(ByteBuffer.wrap(Array[Byte]()))
   }
 
