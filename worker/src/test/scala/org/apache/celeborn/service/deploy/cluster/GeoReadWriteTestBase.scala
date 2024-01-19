@@ -51,6 +51,7 @@ trait GeoReadWriteTestBase extends ReadWriteTestBase {
       .set(CelebornConf.READ_LOCAL_SHUFFLE_FILE, false)
       .set("celeborn.data.io.numConnectionsPerPeer", "1")
       .set("celeborn.client.shuffle.manager.port", "19001")
+      .set("celeborn.site.number", "2")
       .set(CelebornConf.GSS_MODE.key, "true")
       .set(CelebornConf.TEST_GSS_EARLY_SCHEDULE.key, "true")
 

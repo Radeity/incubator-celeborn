@@ -57,8 +57,9 @@ class CelebornPipelineSortSuite extends AnyFunSuite
       .set(s"spark.${CelebornConf.CLIENT_PUSH_SORT_RANDOMIZE_PARTITION_ENABLED.key}", "false")
       .set(s"spark.${CelebornConf.TEST_GSS_EARLY_SCHEDULE.key}", "true")
       .set(s"spark.${CelebornConf.GSS_MODE.key}", "true")
-      .set(s"spark.${CelebornConf.CLIENT_SHUFFLE_MANAGER_PORT.key}", "9097")
+      .set(s"spark.${CelebornConf.CLIENT_SHUFFLE_MANAGER_PORT.key}", "19001")
       .set(s"spark.${CelebornConf.CLIENT_FETCH_THROWS_FETCH_FAILURE.key}", "true")
+      .set("celeborn.site.number", "2")
   }
 
   test(s"celeborn spark integration test - skew join - LZ4") {

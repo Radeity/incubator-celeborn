@@ -766,8 +766,6 @@ private[deploy] class Controller(
     val partitionNum = oldLocations.size()
     for (i <- 0 until partitionNum) {
       // First, flush all local datas in flushBuffer
-      logInfo(
-        s"[Partition-$i] shuffleKey: $shuffleKey, partition location info: $partitionLocationInfo")
       val oldLocation: PartitionLocation =
         partitionLocationInfo.getPrimaryLocation(shuffleKey, oldLocations.get(i).getUniqueId)
       val newLocation: PartitionLocation = newLocations.get(i)

@@ -95,6 +95,10 @@ public class SparkShuffleManager implements ShuffleManager {
     nodeSiteMap.put("10.176.24.57", 2);
   }
 
+  private final int siteIdx;
+
+  private ThriftManager thriftManager;
+
   private List<LifecycleManager> siteLifecycleManager;
   //  private ShuffleClient[] shuffleClients = new ShuffleClient[2];
   private ShuffleClient shuffleClient;
@@ -136,6 +140,19 @@ public class SparkShuffleManager implements ShuffleManager {
     this.sendBufferPoolCheckInterval = celebornConf.clientPushSendBufferPoolExpireCheckInterval();
     this.sendBufferPoolExpireTimeout = celebornConf.clientPushSendBufferPoolExpireTimeout();
     this.siteNumber = celebornConf.siteNumber();
+    String host = org.apache.celeborn.common.util.Utils.localHostName(celebornConf);
+    this.siteIdx = nodeSiteMap.getOrDefault(host, 0);
+
+    this.thriftManager = new ThriftManager("10.176.24.55", 7777, logger, appUniqueId);
+    //    try {
+    //      this.transport = new TSocket("10.176.24.55", 7777);
+    //      this.transport.open();
+    //    } catch (TTransportException e) {
+    //      e.printStackTrace();
+    //    }
+    //
+    //    TProtocol protocol = new TBinaryProtocol(this.transport);
+    //    this.thriftClient = new gurobiService.Client(protocol);
   }
 
   private SortShuffleManager sortShuffleManager() {
@@ -261,6 +278,9 @@ public class SparkShuffleManager implements ShuffleManager {
 
   @Override
   public void stop() {
+    if (thriftManager != null) {
+      thriftManager.stop();
+    }
     //    if (shuffleClients != null) {
     //      for (ShuffleClient shuffleClient : shuffleClients) {
     //        shuffleClient.shutdown();
@@ -294,7 +314,9 @@ public class SparkShuffleManager implements ShuffleManager {
       if (handle instanceof CelebornShuffleHandle) {
         @SuppressWarnings("unchecked")
         CelebornShuffleHandle<K, V, ?> h = ((CelebornShuffleHandle<K, V, ?>) handle);
-        String host = org.apache.celeborn.common.util.Utils.localHostName(celebornConf);
+        //        String host = org.apache.celeborn.common.util.Utils.localHostName(celebornConf);
+        //        int siteIdx = nodeSiteMap.getOrDefault(host, 0);
+        //
         //        int siteIdx = (int) (mapId % siteNumber); // nodeSiteMap.getOrDefault(host, 0);
         //        shuffleClients[siteIdx] =
         //            ShuffleClient.get(
@@ -305,7 +327,6 @@ public class SparkShuffleManager implements ShuffleManager {
         //                h.userIdentifier(),
         //                siteIdx);
         //        ShuffleClient shuffleClient = shuffleClients[siteIdx];
-        int siteIdx = nodeSiteMap.getOrDefault(host, 0);
         shuffleClient =
             ShuffleClient.get(
                 h.appUniqueId(),
@@ -338,7 +359,7 @@ public class SparkShuffleManager implements ShuffleManager {
                 shuffleId, h, context, celebornConf, shuffleClient, metrics, pool);
           } else {
             return new HashBasedShuffleWriter<>(
-                shuffleId, h, context, celebornConf, shuffleClient, metrics, pool);
+                shuffleId, h, context, celebornConf, shuffleClient, metrics, pool, thriftManager);
           }
         } else {
           throw new UnsupportedOperationException(
@@ -453,7 +474,8 @@ public class SparkShuffleManager implements ShuffleManager {
           context,
           celebornConf,
           metrics,
-          shuffleIdTracker);
+          shuffleIdTracker,
+          siteIdx);
     }
   }
 
@@ -481,7 +503,13 @@ public class SparkShuffleManager implements ShuffleManager {
     return this.siteLifecycleManager.get(0);
   }
 
-  public void updatePartitionSite(String appUniqueId, int appShuffleId, String[] partitionSite) {
+  public void updatePartitionSite(
+      String appUniqueId, Integer appShuffleId, Integer[] partitionSite) {
+    logger.info(
+        "Receive updatePartitionSite request, {}, {}, {}",
+        appUniqueId,
+        appShuffleId,
+        partitionSite);
     int numPartition = partitionSite.length;
     PartitionLocation[] newSitePartitionLocation = new PartitionLocation[numPartition];
     int[] shuffleIds = new int[siteNumber];
@@ -495,7 +523,7 @@ public class SparkShuffleManager implements ShuffleManager {
     }
 
     for (int partitionIdx = 0; partitionIdx < numPartition; partitionIdx++) {
-      int newSite = Integer.parseInt(partitionSite[partitionIdx]);
+      int newSite = partitionSite[partitionIdx];
       PartitionLocation newLocation =
           siteLifecycleManager
               .get(newSite)

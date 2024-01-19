@@ -38,7 +38,7 @@
     <module>worker</module>
     <module>client-spark/common</module>
     <module>client-spark/spark-3</module>
-    <module>client-spark/spark-3-columnar-shuffle</module>
+    <!--    <module>client-spark/spark-3-columnar-shuffle</module>-->
     <module>client-spark/spark-3-shaded</module>
     <module>tests/spark-it</module>
   </modules>
@@ -1067,7 +1067,7 @@
       <modules>
         <module>client-spark/common</module>
         <module>client-spark/spark-3</module>
-        <module>client-spark/spark-3-columnar-shuffle</module>
+        <!--        <module>client-spark/spark-3-columnar-shuffle</module>-->
         <module>client-spark/spark-3-shaded</module>
         <module>tests/spark-it</module>
       </modules>

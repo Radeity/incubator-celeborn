@@ -875,7 +875,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
       handler()
     } catch {
       case e: Exception =>
-        logError(s"Error while handle${message.`type`()} $message", e)
+        logError(s"Error while handle ${message.`type`()} $message", e)
         client.getChannel.writeAndFlush(new RpcFailure(
           requestId,
           Throwables.getStackTraceAsString(e)))
@@ -1422,7 +1422,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
             fileWriter = fileWriters(i)
             val offset = body.readerIndex() + batchOffsets(index)
             val length =
-              if (index == fileWriters.length - 1) {
+              if (index == batchOffsets.length - 1) {
                 body.readableBytes() - batchOffsets(index)
               } else {
                 batchOffsets(index + 1) - batchOffsets(index)

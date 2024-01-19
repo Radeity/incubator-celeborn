@@ -18,7 +18,9 @@
 package org.apache.spark.shuffle.celeborn;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 
 import javax.annotation.Nullable;
@@ -39,6 +41,7 @@ import org.apache.spark.serializer.SerializationStream;
 import org.apache.spark.serializer.SerializerInstance;
 import org.apache.spark.shuffle.ShuffleWriteMetricsReporter;
 import org.apache.spark.shuffle.ShuffleWriter;
+import org.apache.spark.shuffle.celeborn.rpc.Request2;
 import org.apache.spark.sql.catalyst.expressions.UnsafeRow;
 import org.apache.spark.sql.execution.UnsafeRowSerializer;
 import org.apache.spark.sql.execution.metric.SQLMetric;
@@ -81,6 +84,11 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
 
   private byte[][] sendBuffers;
   private int[] sendOffsets;
+  private Long[] sendBytes;
+  private long idx = 0;
+  private long lastReportPartitionMetric = 0;
+  private final String applicationId;
+  private ThriftManager thriftManager;
 
   private final LongAdder[] mapStatusLengths;
   private final long[] tmpRecords;
@@ -107,7 +115,8 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
       CelebornConf conf,
       ShuffleClient client,
       ShuffleWriteMetricsReporter metrics,
-      SendBufferPool sendBufferPool)
+      SendBufferPool sendBufferPool,
+      ThriftManager thriftManager)
       throws IOException {
     this.mapId = taskContext.partitionId();
     this.dep = handle.dependency();
@@ -136,6 +145,17 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
     this.sendBufferPool = sendBufferPool;
     sendBuffers = sendBufferPool.acquireBuffer(numPartitions);
     sendOffsets = new int[numPartitions];
+    sendBytes = new Long[numPartitions];
+    for (int i = 0; i < numPartitions; i++) {
+      sendBytes[i] = Long.valueOf(0);
+    }
+
+    // through this method calling to register shuffle in advance
+    shuffleClient.getPartitionLocation(shuffleId, numMappers, numPartitions);
+
+    applicationId = handle.appUniqueId();
+    //    applicationId = dep.rdd().context().applicationId();
+    this.thriftManager = thriftManager;
 
     try {
       LinkedBlockingQueue<PushTask> pushTaskQueue = sendBufferPool.acquirePushTaskQueue();
@@ -159,6 +179,17 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
 
   @Override
   public void write(scala.collection.Iterator<Product2<K, V>> records) throws IOException {
+    Request2 request =
+        new Request2(
+            applicationId,
+            taskContext.stageId(),
+            taskContext.partitionId(),
+            numMappers,
+            numPartitions,
+            shuffleId,
+            idx,
+            Arrays.asList(sendBytes));
+    thriftManager.send(request);
     try {
       if (canUseFastWrite()) {
         fastWrite0(records);
@@ -237,7 +268,7 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
 
   private void write0(scala.collection.Iterator iterator) throws IOException, InterruptedException {
     final scala.collection.Iterator<Product2<K, ?>> records = iterator;
-
+    lastReportPartitionMetric = System.nanoTime();
     while (records.hasNext()) {
       final Product2<K, ?> record = records.next();
       final K key = record._1();
@@ -250,6 +281,8 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
       final int serializedRecordSize = serBuffer.size();
       assert (serializedRecordSize > 0);
 
+      sendBytes[partitionId] += serializedRecordSize;
+      idx += 1;
       if (serializedRecordSize > PUSH_BUFFER_MAX_SIZE) {
         pushGiantRecord(partitionId, serBuffer.getBuf(), serializedRecordSize);
       } else {
@@ -316,6 +349,28 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
     long start = System.nanoTime();
     logger.debug("Flush buffer, size {}.", Utils.bytesToString(size));
     dataPusher.addTask(partitionId, buffer, size);
+    if (TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - lastReportPartitionMetric) > 500) {
+      logger.info(
+          "GSSOutputMetric: {}-{}-{}| {}| {}",
+          applicationId,
+          taskContext.stageId(),
+          taskContext.partitionId(),
+          idx,
+          Arrays.asList(sendBytes));
+      //      Request2 request =
+      //              new Request2(
+      //                      applicationId,
+      //                      taskContext.stageId(),
+      //                      taskContext.partitionId(),
+      //                      numPartitions,
+      //                      shuffleId,
+      //                      idx,
+      //                      Arrays.asList(sendBytes));
+      //      thriftClient.reportPartitionSize(request);
+      //      logger.info("Already send request for {}-{}-{}", applicationId, taskContext.stageId(),
+      // taskContext.partitionId());
+      lastReportPartitionMetric = System.nanoTime();
+    }
     writeMetrics.incWriteTime(System.nanoTime() - start);
   }
 
@@ -356,6 +411,26 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
   private void close() throws IOException, InterruptedException {
     // here we wait for all the in-flight batches to return which sent by dataPusher thread
     long pushMergedDataTime = System.nanoTime();
+    logger.info(
+        "GSSOutputMetric(close): {}-{}-{}| {}| {}",
+        applicationId,
+        taskContext.stageId(),
+        taskContext.partitionId(),
+        idx,
+        Arrays.asList(sendBytes));
+    //    Request2 request =
+    //        new Request2(
+    //            applicationId,
+    //            taskContext.stageId(),
+    //            taskContext.partitionId(),
+    //            numMappers,
+    //            numPartitions,
+    //            shuffleId,
+    //            idx,
+    //            Arrays.asList(sendBytes));
+    //    thriftClient.reportPartitionSize(request);
+    //    logger.info("report partition size for application {}", applicationId);
+
     dataPusher.waitOnTermination();
     sendBufferPool.returnPushTaskQueue(dataPusher.getIdleQueue());
     shuffleClient.prepareForMergeData(shuffleId, mapId, taskContext.attemptNumber());

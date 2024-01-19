@@ -679,26 +679,25 @@ class LifecycleManager(
       numMappers: Int): Unit = {
 
     // for test, remove later
-    if (siteIdx == 0) {
-      Thread.sleep(1600)
-    }
+//    if (siteIdx == 0) {
+//      Thread.sleep(10000)
+//    }
 
     val (mapperAttemptFinishedSuccess, allMapperFinished) =
       commitManager.finishMapperAttempt(shuffleId, mapId, attemptId, numMappers)
-    logDebug(s"site: $siteIdx handleMapperEnd: shuffleId-$shuffleId mapId-$mapId $mapperAttemptFinishedSuccess, $allMapperFinished")
+    logInfo(s"[Site-$siteIdx] HandleMapperEnd: shuffleId-$shuffleId mapId-$mapId $mapperAttemptFinishedSuccess, $allMapperFinished")
     if (mapperAttemptFinishedSuccess && allMapperFinished) {
       if (!gssMode || finishHandleScheduledShuffle.contains(shuffleId)) {
         // last mapper finished. call mapper end
-        logDebug(s"Last MapperEnd, call StageEnd with shuffleKey:" +
+        logInfo(s"[Site-$siteIdx] Last MapperEnd, call StageEnd with shuffleKey:" +
           s"shuffleId $shuffleId.")
         rpcEndpointRefs.foreach(_.send(StageEnd(shuffleId)))
       } else {
         // for test
         if (conf.testGSSEarlySchedule) {
-          logDebug(s"[Site-$siteIdx] Mock schedule result for test")
+          logInfo(s"[Site-$siteIdx] Mock schedule result for test")
           val newLocs = ArrayBuffer[PartitionLocation]()
           latestPartitionLocation.get(shuffleId).forEach((_, p) => newLocs += p)
-          logInfo("newLocs:" + newLocs)
 
           var appShuffleId = -1
           // use appShuffleId, unify id between multi-siteManager

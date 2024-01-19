@@ -30,6 +30,11 @@
 
   <dependencies>
     <dependency>
+      <groupId>org.apache.thrift</groupId>
+      <artifactId>libthrift</artifactId>
+      <version>0.14.2</version>
+    </dependency>
+    <dependency>
       <groupId>org.apache.celeborn</groupId>
       <artifactId>celeborn-common_${scala.binary.version}</artifactId>
       <version>${project.version}</version>

@@ -89,10 +89,11 @@ public class SparkUtils {
   }
 
   public static String appUniqueId(SparkContext context) {
-    return context
-        .applicationAttemptId()
-        .map(id -> context.applicationId() + "_" + id)
-        .getOrElse(context::applicationId);
+    return context.applicationId();
+    //    return context
+    //        .applicationAttemptId()
+    //        .map(id -> context.applicationId() + "_" + id)
+    //        .getOrElse(context::applicationId);
   }
 
   public static String getAppShuffleIdentifier(int appShuffleId, TaskContext context) {

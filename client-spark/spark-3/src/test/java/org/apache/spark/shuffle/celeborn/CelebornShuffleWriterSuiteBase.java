@@ -25,6 +25,7 @@ import static org.junit.Assert.fail;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Random;
 import java.util.UUID;
@@ -54,6 +55,8 @@ import org.apache.spark.serializer.Serializer;
 import org.apache.spark.serializer.SerializerInstance;
 import org.apache.spark.shuffle.ShuffleWriteMetricsReporter;
 import org.apache.spark.shuffle.ShuffleWriter;
+import org.apache.spark.shuffle.celeborn.rpc.Request2;
+import org.apache.spark.shuffle.celeborn.rpc.gurobiService;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.UnsafeProjection;
 import org.apache.spark.sql.catalyst.expressions.UnsafeRow;
@@ -64,10 +67,13 @@ import org.apache.spark.sql.types.StringType$;
 import org.apache.spark.storage.BlockManager;
 import org.apache.spark.storage.BlockManagerId;
 import org.apache.spark.unsafe.types.UTF8String;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import org.apache.thrift.TException;
+import org.apache.thrift.protocol.TBinaryProtocol;
+import org.apache.thrift.protocol.TProtocol;
+import org.apache.thrift.transport.TSocket;
+import org.apache.thrift.transport.TTransport;
+import org.apache.thrift.transport.TTransportException;
+import org.junit.*;
 import org.mockito.Answers;
 import org.mockito.Mock;
 import org.mockito.Mockito;
@@ -149,6 +155,39 @@ public abstract class CelebornShuffleWriterSuiteBase {
     Mockito.doReturn(blockManager).when(env).blockManager();
     Mockito.doReturn(sparkConf).when(env).conf();
     SparkEnv.set(env);
+  }
+
+  @Test
+  public void testHashCode() {
+    String s = "繁华";
+    System.out.println(s.hashCode());
+    String s1 = "辛芷蕾";
+    System.out.println(s1.hashCode());
+  }
+
+  @Ignore
+  public void testRPC() throws TException, InterruptedException {
+    TTransport transport1 = new TSocket("10.176.24.55", 7777);
+    TBinaryProtocol protocol1 = new TBinaryProtocol(transport1);
+    transport1.open();
+
+    TTransport transport = new TSocket("10.176.24.55", 7777);
+    TProtocol protocol = new TBinaryProtocol(transport);
+    transport.open();
+    gurobiService.Client thriftClient = new gurobiService.Client(protocol);
+    Long[] arr = new Long[4];
+    for (int i = 0; i < 4; i++) {
+      arr[i] = Long.valueOf(10);
+    }
+    for (int i = 0; i < 5; i++) {
+      arr[0] += 10;
+      Request2 request = new Request2("app-001", 0, 0, 4, 4, 0, 10, Arrays.asList(arr));
+      thriftClient.reportPartitionSize(request);
+      System.out.println("send:" + i);
+      Thread.sleep(1000);
+    }
+    System.out.println("Finish!");
+    transport.close();
   }
 
   @Test
@@ -373,5 +412,5 @@ public abstract class CelebornShuffleWriterSuiteBase {
       CelebornConf conf,
       ShuffleClient client,
       ShuffleWriteMetricsReporter metrics)
-      throws IOException;
+      throws IOException, TTransportException;
 }
