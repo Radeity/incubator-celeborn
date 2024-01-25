@@ -116,7 +116,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
           pushData.requestId,
           () => {
             logDebug(
-              s"Receive push data request, parition:${pushData.partitionUniqueId}, data size:${pushData.body().size()}")
+              s"Receive push data request ${pushData.requestId}, parition:${pushData.partitionUniqueId}, data size:${pushData.body().size()}")
             val callback = new SimpleRpcResponseCallback(
               client,
               pushData.requestId,
@@ -140,7 +140,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
           pushMergedData.requestId,
           () => {
             logDebug(
-              s"Receive push merged data request, data size: ${pushMergedData.body().size()}")
+              s"Receive push merged data request ${pushMergedData.requestId}, data size: ${pushMergedData.body().size()}")
             handlePushMergedData(
               pushMergedData,
               new SimpleRpcResponseCallback(
@@ -239,18 +239,19 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
       val newLocation: PartitionLocation = redirectPartitionMap.getOrDefault(location, null)
       if (newLocation != null && !newLocation.equals(location)) {
         pushData.body().retain()
-        val redirectPromise: Promise[Unit] = Promise[Unit]
+//        val redirectPromise: Promise[Unit] = Promise[Unit]
         val newPushDataMsg =
           new PushData(pushData.mode, pushData.shuffleKey, newLocation.getUniqueId, pushData.body())
-        redirectRequest(newPushDataMsg, newLocation, redirectPromise)
-        // TODO: 假设都可以正常完成 re-direct，但有必要保留这个Promise吗？如果之后跑的时候遇到问题，需要留意一下，
-        //  但感觉应该问题不大，有了第一层 callback 已经是异步模式了
-        Try(Await.result(redirectPromise.future, Duration.Inf)) match {
-          case Success(_) =>
-            callbackWithTimer.onSuccess(
-              ByteBuffer.wrap(Array[Byte](StatusCode.PUSH_REMOTE_SITE.getValue)))
-          case Failure(e) => callbackWithTimer.onFailure(e)
-        }
+        redirectRequest(newPushDataMsg, newLocation, null, callbackWithTimer)
+//        redirectRequest(newPushDataMsg, newLocation, redirectPromise, callbackWithTimer)
+//        // TODO: 假设都可以正常完成 re-direct，但有必要保留这个Promise吗？如果之后跑的时候遇到问题，需要留意一下，
+//        //  但感觉应该问题不大，有了第一层 callback 已经是异步模式了
+//        Try(Await.result(redirectPromise.future, Duration.Inf)) match {
+//          case Success(_) =>
+//            callbackWithTimer.onSuccess(
+//              ByteBuffer.wrap(Array[Byte](StatusCode.PUSH_REMOTE_SITE.getValue)))
+//          case Failure(e) => callbackWithTimer.onFailure(e)
+//        }
         return
       }
     }
@@ -553,7 +554,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
             newBody)
           val redirectPromise = Promise[Unit]()
           redirectFutureList.append(redirectPromise.future)
-          redirectRequest(newPushDataMsg, newLocation, redirectPromise)
+          redirectRequest(newPushDataMsg, newLocation, redirectPromise, null)
         } else {
           localPartitionIdxs.append(i)
         }
@@ -747,52 +748,67 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
   private def redirectRequest(
       msg: Message,
       newLocation: PartitionLocation,
-      redirectPromise: Promise[Unit]): Unit = {
-    val wrappedCallback: RpcResponseCallback = new RpcResponseCallback {
-      override def onSuccess(response: ByteBuffer): Unit = {
-        redirectPromise.success()
-        if (response.remaining() > 0) {
-          val resp = ByteBuffer.allocate(response.remaining())
-          resp.put(response)
-          resp.flip()
+      redirectPromise: Promise[Unit],
+      callback: RpcResponseCallback): Unit = {
+    replicateThreadPool.submit(new Runnable {
+      override def run(): Unit = {
+        val wrappedCallback: RpcResponseCallback = new RpcResponseCallback {
+          override def onSuccess(response: ByteBuffer): Unit = {
+            if (callback != null) {
+              if (response.remaining() > 0) {
+                val resp = ByteBuffer.allocate(response.remaining())
+                resp.put(response)
+                resp.flip()
+                callback.onSuccess(resp)
+              } else {
+                callback.onSuccess(ByteBuffer.wrap(Array[Byte]()))
+              }
+            } else {
+              redirectPromise.success()
+            }
+          }
+
+          override def onFailure(e: Throwable): Unit = {
+            logError(
+              s"Redirect push data request to newLocation $newLocation failed, cause: ${e.getMessage}")
+            if (callback != null) {
+              callback.onFailure(new CelebornIOException(StatusCode.PUSH_REMOTE_SITE_FAIL))
+            } else {
+              redirectPromise.failure(new CelebornIOException(StatusCode.PUSH_REMOTE_SITE_FAIL))
+            }
+          }
+        }
+
+        try {
+          val client: TransportClient =
+            getClient(newLocation.getHost, newLocation.getPushPort, newLocation.getId)
+          msg match {
+            case pushData: PushData =>
+              logInfo(
+                s"Redirect and send new PushData request of partition ${pushData.partitionUniqueId} to new partition ${newLocation.hostAndPushPort()}, length: ${pushData.body().size()}")
+              client.pushData(
+                pushData,
+                shufflePushDataTimeout.get(pushData.shuffleKey),
+                wrappedCallback)
+            case pushMergedData: PushMergedData =>
+              client.pushMergedData(
+                pushMergedData,
+                shufflePushDataTimeout.get(pushMergedData.shuffleKey),
+                wrappedCallback)
+          }
+        } catch {
+          case e: Exception =>
+            // NOTE: replica 开一个线程去做，要在复制之前先 retain，然后复制完成再 release，
+            //  防止主线程执行完 handlePush 就 release buffer 将其回收掉；
+            //  另外需要 release 的场景为发生异常，不会执行到 handleCore 的 release
+            msg.body().release()
+            logError(
+              s"Redirect and push data to location $newLocation failed",
+              e)
+            redirectPromise.failure(new CelebornIOException(StatusCode.PUSH_REMOTE_SITE_FAIL))
         }
       }
-
-      override def onFailure(e: Throwable): Unit = {
-        logError(
-          s"Redirect push data request to newLocation $newLocation failed, cause: ${e.getMessage}")
-        redirectPromise.failure(new CelebornIOException(StatusCode.PUSH_REMOTE_SITE_FAIL))
-      }
-    }
-
-    try {
-      val client: TransportClient =
-        getClient(newLocation.getHost, newLocation.getPushPort, newLocation.getId)
-      msg match {
-        case pushData: PushData =>
-          logInfo(
-            s"Redirect and send new PushData request of partition ${pushData.partitionUniqueId} to new partition ${newLocation.hostAndPushPort()}, length: ${pushData.body().size()}")
-          client.pushData(
-            pushData,
-            shufflePushDataTimeout.get(pushData.shuffleKey),
-            wrappedCallback)
-        case pushMergedData: PushMergedData =>
-          client.pushMergedData(
-            pushMergedData,
-            shufflePushDataTimeout.get(pushMergedData.shuffleKey),
-            wrappedCallback)
-      }
-    } catch {
-      case e: Exception =>
-        // NOTE: replica 开一个线程去做，要在复制之前先 retain，然后复制完成再 release，
-        //  防止主线程执行完 handlePush 就 release buffer 将其回收掉；
-        //  另外需要 release 的场景为发生异常，不会执行到 handleCore 的 release
-        msg.body().release()
-        logError(
-          s"Redirect and push data to location $newLocation failed",
-          e)
-        redirectPromise.failure(new CelebornIOException(StatusCode.PUSH_REMOTE_SITE_FAIL))
-    }
+    })
   }
 
   /**

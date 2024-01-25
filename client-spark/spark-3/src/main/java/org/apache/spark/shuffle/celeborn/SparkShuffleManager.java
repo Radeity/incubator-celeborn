@@ -93,6 +93,8 @@ public class SparkShuffleManager implements ShuffleManager {
     nodeSiteMap.put("10.176.24.55", 0);
     nodeSiteMap.put("10.176.24.56", 1);
     nodeSiteMap.put("10.176.24.57", 2);
+    nodeSiteMap.put("10.176.24.53", 3);
+    nodeSiteMap.put("10.176.24.60", 4);
   }
 
   private final int siteIdx;
@@ -102,6 +104,7 @@ public class SparkShuffleManager implements ShuffleManager {
   private List<LifecycleManager> siteLifecycleManager;
   //  private ShuffleClient[] shuffleClients = new ShuffleClient[2];
   private ShuffleClient shuffleClient;
+  private List<ShuffleClient> redirectShuffleClients;
   private volatile SortShuffleManager _sortShuffleManager;
   private final ConcurrentHashMap.KeySetView<Integer, Boolean> sortShuffleIds =
       ConcurrentHashMap.newKeySet();
@@ -143,7 +146,9 @@ public class SparkShuffleManager implements ShuffleManager {
     String host = org.apache.celeborn.common.util.Utils.localHostName(celebornConf);
     this.siteIdx = nodeSiteMap.getOrDefault(host, 0);
 
+    // TODO: fix null appUniqueId
     this.thriftManager = new ThriftManager("10.176.24.55", 7777, logger, appUniqueId);
+    this.redirectShuffleClients = new ArrayList<>();
     //    try {
     //      this.transport = new TSocket("10.176.24.55", 7777);
     //      this.transport.open();
@@ -293,6 +298,13 @@ public class SparkShuffleManager implements ShuffleManager {
       ShuffleClient.reset();
       shuffleClient = null;
     }
+    redirectShuffleClients.forEach(
+        client -> {
+          client.shutdown();
+          ShuffleClient.reset();
+          client = null;
+        });
+
     if (siteLifecycleManager != null) {
       for (LifecycleManager lifecycleManager : siteLifecycleManager) {
         if (lifecycleManager != null) {
@@ -503,15 +515,13 @@ public class SparkShuffleManager implements ShuffleManager {
     return this.siteLifecycleManager.get(0);
   }
 
-  public void updatePartitionSite(
-      String appUniqueId, Integer appShuffleId, Integer[] partitionSite) {
+  public void updatePartitionSite(String appUniqueId, Integer appShuffleId, Integer[] partitionSite)
+      throws InterruptedException {
     logger.info(
         "Receive updatePartitionSite request, {}, {}, {}",
         appUniqueId,
         appShuffleId,
         partitionSite);
-    int numPartition = partitionSite.length;
-    PartitionLocation[] newSitePartitionLocation = new PartitionLocation[numPartition];
     int[] shuffleIds = new int[siteNumber];
     int waitSites = 0;
     for (int siteIdx = 0; siteIdx < siteNumber; siteIdx++) {
@@ -522,8 +532,19 @@ public class SparkShuffleManager implements ShuffleManager {
       }
     }
 
+    int numPartition = partitionSite.length;
+    PartitionLocation[] newSitePartitionLocation = new PartitionLocation[numPartition];
     for (int partitionIdx = 0; partitionIdx < numPartition; partitionIdx++) {
       int newSite = partitionSite[partitionIdx];
+      // here's a trick
+      int waitTimes = 0;
+      while (siteLifecycleManager.get(newSite).getShuffleIdFromAppShuffleId(appShuffleId) == -1
+          && waitTimes < 5) {
+        //        newSite = (newSite + 1) % siteNumber;
+        logger.warn("Site {} has not reserved slots yet, wait {} times", newSite);
+        Thread.sleep(200);
+        waitSites += 1;
+      }
       PartitionLocation newLocation =
           siteLifecycleManager
               .get(newSite)

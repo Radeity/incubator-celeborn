@@ -128,6 +128,8 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
     this.numMappers = handle.numMappers();
     this.numPartitions = dep.partitioner().numPartitions();
     this.shuffleClient = client;
+    // through this method calling to register shuffle in advance
+    shuffleClient.getPartitionLocation(shuffleId, numMappers, numPartitions);
 
     unsafeRowFastWrite = conf.clientPushUnsafeRowFastWrite();
     serBuffer = new OpenByteArrayOutputStream(DEFAULT_INITIAL_SER_BUFFER_SIZE);
@@ -149,9 +151,6 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
     for (int i = 0; i < numPartitions; i++) {
       sendBytes[i] = Long.valueOf(0);
     }
-
-    // through this method calling to register shuffle in advance
-    shuffleClient.getPartitionLocation(shuffleId, numMappers, numPartitions);
 
     applicationId = handle.appUniqueId();
     //    applicationId = dep.rdd().context().applicationId();
@@ -349,6 +348,7 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
     long start = System.nanoTime();
     logger.debug("Flush buffer, size {}.", Utils.bytesToString(size));
     dataPusher.addTask(partitionId, buffer, size);
+    // TODO: remove this for efficiency in formal experiment
     if (TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - lastReportPartitionMetric) > 500) {
       logger.info(
           "GSSOutputMetric: {}-{}-{}| {}| {}",

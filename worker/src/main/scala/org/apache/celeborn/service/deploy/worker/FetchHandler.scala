@@ -235,7 +235,6 @@ class FetchHandler(
     // Second, read local partition
     val shuffleChannel: FileChannel =
       FileChannelUtils.openReadableFileChannel(pbStreamHandler.getFullPath)
-    val client: TransportClient = getClient(newLoc.getHost, newLoc.getPushPort, newLoc.getId)
     var currentIndex = 0
     val future: CompletableFuture[Void] = new CompletableFuture[Void]()
     val counter: AtomicInteger = new AtomicInteger(numChunks)
@@ -287,6 +286,8 @@ class FetchHandler(
             }
 
             try {
+              val client: TransportClient =
+                getClient(newLoc.getHost, newLoc.getPushPort, newLoc.getId)
               val newPushData: PushData = new PushData(
                 0,
                 shuffleKey,
@@ -315,6 +316,7 @@ class FetchHandler(
         // Fifth, send RPC message to new location to notify once-redirect steps done
         val (appUniqueId, shuffleId) = Utils.splitShuffleKey(shuffleKey)
         logDebug(s"[Partition-${newLoc.getUniqueId}] Send RPC message to new location to notify once-redirect steps done for shuffle $shuffleKey")
+        val client: TransportClient = getClient(newLoc.getHost, newLoc.getPushPort, newLoc.getId)
         client.sendRpc(
           new TransportMessage(
             MessageType.PARTITION_SITE_CHANGE,

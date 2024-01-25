@@ -1108,6 +1108,12 @@ public class ShuffleClientImpl extends ShuffleClient {
             TransportClient client =
                 dataClientFactory.createClient(loc.getHost(), loc.getPushPort(), partitionId);
             client.pushData(pushData, pushDataTimeout, wrappedCallback);
+            logger.debug(
+                "already send push data request for shuffle {} map {} partition {}",
+                shuffleId,
+                mapId,
+                attemptId,
+                partitionId);
           } else {
             wrappedCallback.onFailure(
                 new CelebornIOException(

@@ -56,6 +56,8 @@ class CelebornShuffleReader[K, C](
   nodeSiteMap.put("10.176.24.55", 0)
   nodeSiteMap.put("10.176.24.56", 1)
   nodeSiteMap.put("10.176.24.57", 2)
+  nodeSiteMap.put("10.176.24.53", 3)
+  nodeSiteMap.put("10.176.24.60", 4)
 
   private val dep = handle.dependency
   private val shuffleClient = ShuffleClient.get(
