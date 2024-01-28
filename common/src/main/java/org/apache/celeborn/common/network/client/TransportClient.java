@@ -222,11 +222,11 @@ public class TransportClient implements Closeable {
     PushRequestInfo info = new PushRequestInfo(dueTime, callback);
     handler.addPushRequest(requestId, info);
     pushData.requestId = requestId;
-    logger.info(
-        "Redirect request PUSH {}, length {}, partition {}",
-        requestId,
-        pushData.body().size(),
-        pushData.partitionUniqueId);
+    //    logger.info(
+    //        "Redirect request PUSH {}, length {}, partition {}",
+    //        requestId,
+    //        pushData.body().size(),
+    //        pushData.partitionUniqueId);
     PushChannelListener listener = new PushChannelListener(requestId, rpcSendoutCallback);
     ChannelFuture channelFuture = channel.writeAndFlush(pushData).addListener(listener);
     info.setChannelFuture(channelFuture);

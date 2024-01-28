@@ -334,7 +334,7 @@ class FetchHandler(
 
   private def getClient(host: String, port: Int, partitionId: Int): TransportClient = {
     if (workerReplicateRandomConnectionEnabled) {
-      pushClientFactory.createClient(host, port)
+      pushClientFactory.createClient(host, port, -2)
     } else {
       pushClientFactory.createClient(host, port, partitionId)
     }

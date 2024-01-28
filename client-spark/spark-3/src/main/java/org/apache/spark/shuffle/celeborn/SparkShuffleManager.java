@@ -515,35 +515,39 @@ public class SparkShuffleManager implements ShuffleManager {
     return this.siteLifecycleManager.get(0);
   }
 
-  public void updatePartitionSite(String appUniqueId, Integer appShuffleId, Integer[] partitionSite)
+  public void updatePartitionSite(String appUniqueId, Integer shuffleId, Integer[] partitionSite)
       throws InterruptedException {
     logger.info(
-        "Receive updatePartitionSite request, {}, {}, {}",
-        appUniqueId,
-        appShuffleId,
-        partitionSite);
+        "Receive updatePartitionSite request, {}, {}, {}", appUniqueId, shuffleId, partitionSite);
     int[] shuffleIds = new int[siteNumber];
     int waitSites = 0;
     for (int siteIdx = 0; siteIdx < siteNumber; siteIdx++) {
-      shuffleIds[siteIdx] =
-          siteLifecycleManager.get(siteIdx).getShuffleIdFromAppShuffleId(appShuffleId);
-      if (shuffleIds[siteIdx] != -1) {
-        waitSites += 1;
+      shuffleIds[siteIdx] = -1;
+      int waitTimes = 0;
+      while (!siteLifecycleManager.get(siteIdx).latestPartitionLocation().containsKey(shuffleId)
+          && waitTimes < 5) {
+        Thread.sleep(300);
+        logger.warn("Site {} has not reserved slots yet, wait {} times", siteIdx, waitTimes);
+        waitTimes += 1;
       }
+      if (siteLifecycleManager.get(siteIdx).latestPartitionLocation().containsKey(shuffleId)) {
+        waitSites += 1;
+        shuffleIds[siteIdx] = shuffleId;
+      }
+      //      shuffleIds[siteIdx] =
+      //          siteLifecycleManager.get(siteIdx).getShuffleIdFromAppShuffleId(appShuffleId);
+      //      if (shuffleIds[siteIdx] != -1) {
+      //        waitSites += 1;
+      //      }
     }
-
+    logger.info("shuffleIds: {}", shuffleIds);
     int numPartition = partitionSite.length;
     PartitionLocation[] newSitePartitionLocation = new PartitionLocation[numPartition];
     for (int partitionIdx = 0; partitionIdx < numPartition; partitionIdx++) {
       int newSite = partitionSite[partitionIdx];
-      // here's a trick
-      int waitTimes = 0;
-      while (siteLifecycleManager.get(newSite).getShuffleIdFromAppShuffleId(appShuffleId) == -1
-          && waitTimes < 5) {
-        //        newSite = (newSite + 1) % siteNumber;
-        logger.warn("Site {} has not reserved slots yet, wait {} times", newSite);
-        Thread.sleep(200);
-        waitSites += 1;
+      if (shuffleIds[newSite] == -1) {
+        throw new UnsupportedOperationException(
+            "One site doesn't have map task can not be assigned reduce task!");
       }
       PartitionLocation newLocation =
           siteLifecycleManager

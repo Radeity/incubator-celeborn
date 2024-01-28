@@ -143,20 +143,21 @@ public class TransportClientFactory implements Closeable {
       clientPool = connectionPool.get(unresolvedAddress);
     }
 
-    //    int clientIndex = 0;
-    //    if (partitionId == -2) {
-    //      clientIndex = rand.nextInt(numConnectionsPerPeer / 2);
-    //    } else if (partitionId == -3) {
-    //      clientIndex = numConnectionsPerPeer / 2 + rand.nextInt(numConnectionsPerPeer / 2);
-    //    } else {
-    //      clientIndex =
-    //          partitionId < 0
-    //              ? rand.nextInt(numConnectionsPerPeer)
-    //              : partitionId % numConnectionsPerPeer;
-    //    }
+    int clientIndex;
+    if (partitionId == -2) {
+      clientIndex = rand.nextInt(numConnectionsPerPeer / 2);
+    } else if (partitionId == -3) {
+      clientIndex = numConnectionsPerPeer / 2 + rand.nextInt(numConnectionsPerPeer / 2);
+    } else {
+      clientIndex =
+          partitionId < 0
+              ? rand.nextInt(numConnectionsPerPeer)
+              : partitionId % numConnectionsPerPeer;
+    }
 
-    int clientIndex =
-        partitionId < 0 ? rand.nextInt(numConnectionsPerPeer) : partitionId % numConnectionsPerPeer;
+    //    int clientIndex =
+    //        partitionId < 0 ? rand.nextInt(numConnectionsPerPeer) : partitionId %
+    // numConnectionsPerPeer;
     TransportClient cachedClient = clientPool.clients[clientIndex];
     logger.debug(
         "clientIndex: {}, Find client in client pool: {}/{}, size: {}",

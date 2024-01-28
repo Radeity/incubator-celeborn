@@ -1387,7 +1387,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
 
   private def getClient(host: String, port: Int, partitionId: Int): TransportClient = {
     if (workerReplicateRandomConnectionEnabled) {
-      pushClientFactory.createClient(host, port)
+      pushClientFactory.createClient(host, port, -3)
     } else {
       pushClientFactory.createClient(host, port, partitionId)
     }

@@ -103,7 +103,6 @@ class LifecycleManager(
   // app shuffle id -> whether shuffle is determinate, rerun of a indeterminate shuffle gets different result
   private val appShuffleDeterminateMap = JavaUtils.newConcurrentHashMap[Int, Boolean]()
 
-  private val gssMode = conf.gssMode
   private val scheduledShuffle = JavaUtils.newCopyOnWriteArraySet[Int]()
   private val finishHandleScheduledShuffle = JavaUtils.newCopyOnWriteArraySet[Int]()
 
@@ -687,35 +686,33 @@ class LifecycleManager(
       commitManager.finishMapperAttempt(shuffleId, mapId, attemptId, numMappers)
     logInfo(s"[Site-$siteIdx] HandleMapperEnd: shuffleId-$shuffleId mapId-$mapId $mapperAttemptFinishedSuccess, $allMapperFinished")
     if (mapperAttemptFinishedSuccess && allMapperFinished) {
-      if (!gssMode || finishHandleScheduledShuffle.contains(shuffleId)) {
+      if (conf.testGSSEarlySchedule) {
+        // for test
+        logInfo(s"[Site-$siteIdx] Mock schedule result for test")
+        val newLocs = ArrayBuffer[PartitionLocation]()
+        latestPartitionLocation.get(shuffleId).forEach((_, p) => newLocs += p)
+
+        var appShuffleId = -1
+        // use appShuffleId, unify id between multi-siteManager
+        shuffleIdMapping.forEach((aId, m) => {
+          m.values.foreach(e => {
+            if (e._1 == shuffleId) {
+              appShuffleId = aId
+            }
+          })
+        })
+
+        rpcEndpointRefs.foreach(_.send(PartitionSiteChange(
+          appUniqueId,
+          appShuffleId,
+          null,
+          newLocs.asJava,
+          1)))
+      } else {
         // last mapper finished. call mapper end
         logInfo(s"[Site-$siteIdx] Last MapperEnd, call StageEnd with shuffleKey:" +
           s"shuffleId $shuffleId.")
         rpcEndpointRefs.foreach(_.send(StageEnd(shuffleId)))
-      } else {
-        // for test
-        if (conf.testGSSEarlySchedule) {
-          logInfo(s"[Site-$siteIdx] Mock schedule result for test")
-          val newLocs = ArrayBuffer[PartitionLocation]()
-          latestPartitionLocation.get(shuffleId).forEach((_, p) => newLocs += p)
-
-          var appShuffleId = -1
-          // use appShuffleId, unify id between multi-siteManager
-          shuffleIdMapping.forEach((aId, m) => {
-            m.values.foreach(e => {
-              if (e._1 == shuffleId) {
-                appShuffleId = aId
-              }
-            })
-          })
-
-          rpcEndpointRefs.foreach(_.send(PartitionSiteChange(
-            appUniqueId,
-            appShuffleId,
-            null,
-            newLocs.asJava,
-            1)))
-        }
       }
     }
 
@@ -856,6 +853,12 @@ class LifecycleManager(
         s"$shuffleId not registered, maybe no shuffle data within this stage.")
       // record in stageEndShuffleSet
       commitManager.setStageEnd(shuffleId)
+      return
+    }
+
+    if (!finishHandleScheduledShuffle.contains(shuffleId)) {
+      logDebug(
+        s"[Site-$siteIdx] Wait for handle redirect partition site done and then trigger stage end")
       return
     }
 
